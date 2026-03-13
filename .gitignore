@@ -166,8 +166,8 @@ wandb/
 # Data folders
 data/
 outputs/
-lerobot_piper
-mobile-aloha
+lerobot_piper/
+mobile-aloha/
 
 # Translations
 *.mo

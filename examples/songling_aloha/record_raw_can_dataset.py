@@ -47,6 +47,10 @@ CAMERA_KEYS = ("left_high", "left_elbow", "right_elbow")
 DEFAULT_JOINT_NAMES = ("joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "gripper")
 DEFAULT_OBSERVATION_IDS = "0x251,0x252,0x253,0x254,0x255,0x256,0x257"
 DEFAULT_ACTION_IDS = "0x2A1,0x2A2,0x2A3,0x2A4,0x2A5,0x2A6,0x2A7"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DATASET_ROOT = PROJECT_ROOT / "outputs" / "songling_aloha"
+LOCAL_PIPER_BINARY = PROJECT_ROOT / "third_party" / "piper" / "piper" / "piper"
+LOCAL_PIPER_MODELS_DIR = PROJECT_ROOT / "third_party" / "piper" / "models"
 VOICE_ENGINE_CHOICES = ("auto", "piper", "spd-say", "espeak-ng", "espeak", "tone", "log-say", "bell", "off")
 _VOICE_WARN_ONCE_KEYS: set[str] = set()
 _VOICE_LANG_SUPPORT_CACHE: dict[tuple[str, str], bool] = {}
@@ -351,15 +355,19 @@ def _probe_command_output(cmd: list[str], timeout_s: float = 2.0) -> tuple[bool,
 
 
 def _resolve_piper_binary(candidate: str | None) -> str | None:
+    search_order: list[str] = []
     if candidate:
-        resolved = shutil.which(candidate)
+        search_order.append(candidate)
+    search_order.extend(["piper", str(LOCAL_PIPER_BINARY)])
+
+    for item in search_order:
+        resolved = shutil.which(item)
         if resolved is not None:
             return resolved
-        path = Path(candidate).expanduser()
+        path = Path(item).expanduser()
         if path.exists() and path.is_file():
             return str(path)
-        return None
-    return shutil.which("piper")
+    return None
 
 
 def _discover_piper_model(lang: str) -> str | None:
@@ -393,6 +401,7 @@ def _discover_piper_model(lang: str) -> str | None:
             return str(path)
 
     roots = [
+        LOCAL_PIPER_MODELS_DIR,
         Path.home() / ".local/share/piper",
         Path.home() / ".cache/piper",
         Path("/usr/share/piper"),
@@ -424,7 +433,10 @@ def _resolve_piper_model_for_lang(lang: str, configured_model: str | None) -> st
         path = Path(configured_model).expanduser()
         if path.exists() and path.is_file():
             return str(path)
-        return None
+        _warn_voice_once(
+            f"missing-configured-piper-model-{lang}",
+            f"[WARN] Configured Piper model not found: {path}. Trying auto-discovery.",
+        )
     return _discover_piper_model(lang)
 
 
@@ -1507,10 +1519,8 @@ def _resolve_dataset_options(raw_cfg: dict[str, Any], args: argparse.Namespace) 
 
     root_value = args.dataset_root if args.dataset_root is not None else raw_dataset.get("root")
     if not root_value:
-        raise ValueError(
-            "Please explicitly set local output path with --dataset.root=... "
-            "(or configure dataset.root in YAML)."
-        )
+        root_value = str(DEFAULT_DATASET_ROOT)
+        print(f"[INFO] dataset.root not set; defaulting to: {root_value}")
     root = _ensure_local_root_is_writable(
         root_value=root_value,
         resume=resume,
@@ -1989,7 +1999,13 @@ def main() -> None:
         default=None,
         help="Optional Piper speaker id for multi-speaker models.",
     )
-    parser.add_argument("--dataset.root", "--dataset-root", dest="dataset_root", default=None)
+    parser.add_argument(
+        "--dataset.root",
+        "--dataset-root",
+        dest="dataset_root",
+        default=None,
+        help=f"Dataset local root path. Defaults to {DEFAULT_DATASET_ROOT} when omitted.",
+    )
     parser.add_argument("--dataset.fps", "--dataset-fps", dest="dataset_fps", type=int, default=None)
     parser.add_argument(
         "--dataset.episode_time_s",

@@ -313,7 +313,7 @@ lerobot-record \
   --dataset.num_episodes=60 \
   --dataset.episode_time_s=60 \
   --dataset.single_task="Bimanual teleoperation with Songling ALOHA profile" \
-  --dataset.root="/tmp/lerobot_songling_aloha" \
+  --dataset.root="outputs/songling_aloha" \
   --dataset.reset_time_s=60
 ```
 
@@ -330,10 +330,15 @@ schema at runtime (dropping non-record keys such as top-level `fps`), while pres
 native CLI override behavior (`CLI > YAML`) for `--robot.*`, `--teleop.*`, `--display_*`,
 and `--dataset.*`.
 
-For safety, `record_compat.py` requires explicit local output path via `--dataset.root=...`.
+If `--dataset.root` is not provided, `record_compat.py` defaults to:
+- `dataset.root` from `examples/songling_aloha/teleop.yaml` if present
+- otherwise `<repo>/outputs/songling_aloha`
+
 If Hugging Face auth is not configured but `push_to_hub=true` is requested, it automatically
 forces local-only recording (`--dataset.push_to_hub=false`).
-Choose a writable path under your user directory (e.g. `/home/...` or `/tmp/...`), not a protected mount point without write permission.
+Voice settings (`play_sounds`, `voice_*`) continue to come from `examples/songling_aloha/teleop.yaml`
+and can be overridden from CLI.
+Choose a writable path under your user directory or repo workspace, not a protected mount point without write permission.
 
 `lerobot-replay` with integrated Songling chains is still considered future work until a dedicated protocol adapter is merged.
 
@@ -342,7 +347,7 @@ Choose a writable path under your user directory (e.g. `/home/...` or `/tmp/...`
 ```bash
 lerobot-dataset-viz \
   --repo-id your_hf_username/songling_aloha_demo \
-  --root /tmp/lerobot_songling_aloha \
+  --root outputs/songling_aloha \
   --episode-index 0
 ```
 

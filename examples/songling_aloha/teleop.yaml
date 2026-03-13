@@ -74,7 +74,7 @@ display_compressed_images: false
 dataset:
   repo_id: your_hf_username/songling_aloha_demo
   single_task: Bimanual teleoperation with Songling ALOHA profile
-  root: /tmp/lerobot_songling_aloha
+  root: outputs/songling_aloha
   fps: 30
   episode_time_s: 30
   reset_time_s: 15
@@ -88,7 +88,7 @@ play_sounds: true
 voice_lang: zh
 voice_engine: piper
 # Optional: defaults for Piper offline neural TTS so CLI can stay short.
-voice_piper_binary: /home/aiteam/wyl/lerobot0.5.0/lerobot/third_party/piper/piper/piper
-voice_piper_model: /home/aiteam/wyl/lerobot0.5.0/lerobot/third_party/piper/models/zh_CN-huayan-medium.onnx
+voice_piper_binary: third_party/piper/piper/piper
+voice_piper_model: third_party/piper/models/zh_CN-huayan-medium.onnx
 # voice_piper_speaker: null
 resume: false

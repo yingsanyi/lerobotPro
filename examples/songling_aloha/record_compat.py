@@ -29,6 +29,8 @@ from typing import Any
 
 
 DEFAULT_CONFIG_PATH = Path("examples/songling_aloha/teleop.yaml")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DATASET_ROOT = PROJECT_ROOT / "outputs" / "songling_aloha"
 RECORD_TOP_LEVEL_KEYS = {
     "robot",
     "teleop",
@@ -136,7 +138,7 @@ def _ensure_local_root_is_writable(
         raise PermissionError(
             f"Cannot create/access parent directory for dataset root: {parent}\n"
             "Please choose a writable local path, e.g. "
-            "--dataset.root=/home/aiteam/wyl/lerobot0.5.0/lerobot/outputs/songling_datasets/run_001"
+            f"--dataset.root={DEFAULT_DATASET_ROOT / 'run_001'}"
         ) from None
 
     if root_path.exists() and not resume:
@@ -337,19 +339,26 @@ def main() -> None:
     record_cfg = _sanitize_to_record_config(raw_cfg)
     _validate_dataset_defaults(record_cfg, passthrough)
 
-    # Enforce explicit local save path so data location is always intentional.
+    # Resolve local save path with priority: CLI override > YAML dataset.root > repo default.
     root_override, passthrough = _extract_last_flag_value_and_strip(passthrough, ("--dataset.root",))
-    if root_override is None or not root_override.strip():
-        raise ValueError(
-            "Please explicitly set local output path with --dataset.root=... "
-            "(e.g. --dataset.root=/data/songling_aloha_runs/exp001)."
-        )
+    if root_override is not None and root_override.strip():
+        root_value = root_override
+    else:
+        yaml_root = None
+        dataset_cfg = record_cfg.get("dataset")
+        if isinstance(dataset_cfg, dict):
+            candidate = dataset_cfg.get("root")
+            if candidate is not None and str(candidate).strip():
+                yaml_root = str(candidate)
+        root_value = yaml_root if yaml_root is not None else str(DEFAULT_DATASET_ROOT)
+        print(f"[INFO] --dataset.root not provided; defaulting to: {root_value}")
+
     resume_override = _get_last_flag_value(passthrough, ("--resume",))
     if resume_override is None:
         resume = bool(record_cfg.get("resume", False))
     else:
         resume = _parse_cli_bool(resume_override)
-    root_path = _ensure_local_root_is_writable(root_value=root_override, resume=resume)
+    root_path = _ensure_local_root_is_writable(root_value=root_value, resume=resume)
     passthrough.append(f"--dataset.root={root_path}")
 
     # If HF auth is not configured, force local-only recording.
