@@ -15,9 +15,8 @@
 # This workflow automatically labels issues based on their content.
 name: Issue Labeler
 on:
-  # Trigger on new issues and edits to existing issues
-  issues:
-    types: [opened, edited]
+  # Manual only. Automatic triggers are disabled in this fork.
+  workflow_dispatch:
 
 permissions:
   contents: read

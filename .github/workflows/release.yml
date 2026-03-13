@@ -15,9 +15,8 @@
 name: Create Release and Publish to PyPI
 
 on:
-  push:
-    tags:
-      - 'v*.*.*' # Trigger on tags like v0.1.0, v1.0.0
+  # Manual only. Automatic tag trigger is disabled in this fork.
+  workflow_dispatch:
 
 # Sets up the environment variables
 env:

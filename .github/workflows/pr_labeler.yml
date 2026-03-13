@@ -16,12 +16,8 @@
 name: Pull Request Labeler
 
 on:
-  # Allows labeling pull requests when they are opened or updated
-  # zizmor: ignore[dangerous-triggers] Needed to label PRs from forks
-  pull_request_target:
-    branches:
-      - main
-    types: [opened, synchronize, reopened, ready_for_review]
+  # Manual only. Automatic triggers are disabled in this fork.
+  workflow_dispatch:
 
 permissions:
   contents: read
