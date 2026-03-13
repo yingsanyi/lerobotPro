@@ -626,6 +626,7 @@ def _parse_songling_config(config_path: str | None, unknown_args: list[str]):
         class _SonglingUnifiedConfig:
             robot: RobotConfig
             teleop: TeleoperatorConfig | None = None
+            policy: Any | None = None
             fps: int = 60
             display_data: bool = False
             display_ip: str | None = None
@@ -633,6 +634,12 @@ def _parse_songling_config(config_path: str | None, unknown_args: list[str]):
             display_compressed_images: bool = False
             dataset: Any | None = None
             play_sounds: bool | None = None
+            voice_lang: str | None = None
+            voice_rate: int | None = None
+            voice_engine: str | None = None
+            voice_piper_model: str | None = None
+            voice_piper_binary: str | None = None
+            voice_piper_speaker: int | None = None
             resume: bool | None = None
 
         return draccus.parse(_SonglingUnifiedConfig, config_path=config_path, args=unknown_args)
