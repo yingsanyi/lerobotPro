@@ -1,0 +1,94 @@
+# Single source of truth for Songling CAN + camera mapping.
+teleop:
+  type: bi_openarm_leader
+  id: songling_aloha_leader
+  left_arm_config:
+    # User-defined mapping:
+    # set this to the CAN interface that corresponds to your LEFT integrated chain.
+    port: can1
+    use_can_fd: false
+    can_bitrate: 1000000
+    can_data_bitrate: 5000000
+    manual_control: false
+  right_arm_config:
+    # User-defined mapping:
+    # set this to the CAN interface that corresponds to your RIGHT integrated chain.
+    port: can0
+    use_can_fd: false
+    can_bitrate: 1000000
+    can_data_bitrate: 5000000
+    manual_control: false
+
+robot:
+  type: bi_openarm_follower
+  id: songling_aloha_follower
+  left_arm_config:
+    # Keep this aligned with teleop.left_arm_config.port.
+    port: can1
+    side: left
+    use_can_fd: false
+    can_bitrate: 1000000
+    can_data_bitrate: 5000000
+    max_relative_target: 5.0
+    cameras:
+      high:
+        type: opencv
+        # Use stable device symlinks instead of numeric indices to avoid drift across reboots.
+        index_or_path: /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._Dabai_DC1_CC1S74101GJ-video-index0
+        width: 640
+        height: 480
+        fps: 30
+        fourcc: MJPG
+        backend: 200  # V4L2
+      elbow:
+        type: opencv
+        index_or_path: /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._USB_2.0_Camera_AU1GC32017T-video-index0
+        width: 640
+        height: 480
+        fps: 30
+        fourcc: MJPG
+        backend: 200  # V4L2
+  right_arm_config:
+    # Keep this aligned with teleop.right_arm_config.port.
+    port: can0
+    side: right
+    use_can_fd: false
+    can_bitrate: 1000000
+    can_data_bitrate: 5000000
+    max_relative_target: 5.0
+    cameras:
+      elbow:
+        type: opencv
+        index_or_path: /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._Dabai_DC1_CC1S74101GY-video-index0
+        width: 640
+        height: 480
+        fps: 30
+        fourcc: MJPG
+        backend: 200  # V4L2
+
+fps: 30
+display_data: true
+display_compressed_images: false
+
+# Default recording parameters for lerobot-record compatible collection.
+dataset:
+  repo_id: your_hf_username/songling_aloha_demo
+  single_task: Bimanual teleoperation with Songling ALOHA profile
+  root: /tmp/lerobot_songling_aloha
+  fps: 30
+  episode_time_s: 30
+  reset_time_s: 15
+  num_episodes: 1
+  video: true
+  push_to_hub: false
+  streaming_encoding: true
+  encoder_threads: 2
+
+play_sounds: true
+voice_lang: zh
+voice_engine: piper
+# Optional: defaults for Piper offline neural TTS so CLI can stay short.
+voice_piper_binary: /home/aiteam/wyl/lerobot0.5.0/lerobot/third_party/piper/piper/piper
+voice_piper_model: /home/aiteam/wyl/lerobot0.5.0/lerobot/third_party/piper/models/zh_CN-huayan-medium.onnx
+# voice_piper_speaker: null
+resume: false

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Songling ALOHA Integrated CAN"
+  short_description: "Bring-up and adapter workflow for Songling ALOHA CAN"
+  default_prompt: "Use $songling-aloha-integrated-can to adapt LeRobot for Songling's integrated master/slave CAN chain."
