@@ -25,7 +25,14 @@ from dataclasses import dataclass, field
 from torch import Tensor
 
 from lerobot.configs.types import PipelineFeatureType, PolicyFeature
-from lerobot.utils.constants import OBS_ENV_STATE, OBS_IMAGE, OBS_IMAGES, OBS_STATE
+from lerobot.utils.constants import (
+    COUNTERFACTUAL_KEYWORD_TEXT,
+    KEYWORD_TEXT,
+    OBS_ENV_STATE,
+    OBS_IMAGE,
+    OBS_IMAGES,
+    OBS_STATE,
+)
 
 from .core import EnvTransition, PolicyAction
 from .pipeline import (
@@ -162,6 +169,16 @@ class AddBatchDimensionComplementaryDataStep(ComplementaryDataProcessorStep):
             task_value = complementary_data["task"]
             if isinstance(task_value, str):
                 complementary_data["task"] = [task_value]
+
+        if KEYWORD_TEXT in complementary_data:
+            keyword_value = complementary_data[KEYWORD_TEXT]
+            if isinstance(keyword_value, str):
+                complementary_data[KEYWORD_TEXT] = [keyword_value]
+
+        if COUNTERFACTUAL_KEYWORD_TEXT in complementary_data:
+            counterfactual_keyword_value = complementary_data[COUNTERFACTUAL_KEYWORD_TEXT]
+            if isinstance(counterfactual_keyword_value, str):
+                complementary_data[COUNTERFACTUAL_KEYWORD_TEXT] = [counterfactual_keyword_value]
 
         # Process index field - add batch dim if 0D
         if "index" in complementary_data:

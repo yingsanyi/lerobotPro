@@ -23,7 +23,16 @@ from typing import Any
 import numpy as np
 import torch
 
-from lerobot.utils.constants import ACTION, DONE, INFO, OBS_PREFIX, REWARD, TRUNCATED
+from lerobot.utils.constants import (
+    ACTION,
+    COUNTERFACTUAL_KEYWORD_TEXT,
+    DONE,
+    INFO,
+    KEYWORD_TEXT,
+    OBS_PREFIX,
+    REWARD,
+    TRUNCATED,
+)
 
 from .core import EnvTransition, PolicyAction, RobotAction, RobotObservation, TransitionKey
 
@@ -168,12 +177,27 @@ def _extract_complementary_data(batch: dict[str, Any]) -> dict[str, Any]:
     """
     pad_keys = {k: v for k, v in batch.items() if "_is_pad" in k}
     task_key = {"task": batch["task"]} if "task" in batch else {}
+    keyword_text_key = {KEYWORD_TEXT: batch[KEYWORD_TEXT]} if KEYWORD_TEXT in batch else {}
+    counterfactual_keyword_text_key = (
+        {COUNTERFACTUAL_KEYWORD_TEXT: batch[COUNTERFACTUAL_KEYWORD_TEXT]}
+        if COUNTERFACTUAL_KEYWORD_TEXT in batch
+        else {}
+    )
     subtask_key = {"subtask": batch["subtask"]} if "subtask" in batch else {}
     index_key = {"index": batch["index"]} if "index" in batch else {}
     task_index_key = {"task_index": batch["task_index"]} if "task_index" in batch else {}
     episode_index_key = {"episode_index": batch["episode_index"]} if "episode_index" in batch else {}
 
-    return {**pad_keys, **task_key, **subtask_key, **index_key, **task_index_key, **episode_index_key}
+    return {
+        **pad_keys,
+        **task_key,
+        **keyword_text_key,
+        **counterfactual_keyword_text_key,
+        **subtask_key,
+        **index_key,
+        **task_index_key,
+        **episode_index_key,
+    }
 
 
 def create_transition(

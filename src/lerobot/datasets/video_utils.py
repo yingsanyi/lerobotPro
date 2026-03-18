@@ -24,6 +24,7 @@ import threading
 import warnings
 from dataclasses import dataclass, field
 from fractions import Fraction
+from functools import lru_cache
 from pathlib import Path
 from threading import Lock
 from typing import Any, ClassVar
@@ -36,6 +37,13 @@ import torch
 import torchvision
 from datasets.features.features import register_feature
 from PIL import Image
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"The video decoding and encoding capabilities of torchvision are deprecated.*",
+    category=UserWarning,
+    module=r"torchvision\.io\._video_deprecation_warning",
+)
 
 # List of hardware encoders to probe for auto-selection. Availability depends on the platform and FFmpeg build.
 # Determines the order of preference for auto-selection when vcodec="auto" is used.
@@ -114,14 +122,44 @@ def resolve_vcodec(vcodec: str) -> str:
     return "libsvtav1"
 
 
-def get_safe_default_codec():
-    if importlib.util.find_spec("torchcodec"):
-        return "torchcodec"
-    else:
-        logging.warning(
-            "'torchcodec' is not available in your platform, falling back to 'pyav' as a default decoder"
+def _summarize_exception(exc: Exception) -> str:
+    message = str(exc).splitlines()[0].strip()
+    return message or exc.__class__.__name__
+
+
+@lru_cache(maxsize=1)
+def _probe_torchcodec_runtime() -> tuple[bool, str | None]:
+    """Check whether torchcodec can be imported and its runtime dependencies can be loaded."""
+    if importlib.util.find_spec("torchcodec") is None:
+        return False, "'torchcodec' is not installed"
+
+    try:
+        from torchcodec.decoders import VideoDecoder
+    except Exception as exc:
+        return False, f"'torchcodec' is installed but unavailable at runtime ({_summarize_exception(exc)})"
+
+    _ = VideoDecoder
+    return True, None
+
+
+def _is_torchcodec_runtime_failure(exc: Exception) -> bool:
+    message = str(exc)
+    return isinstance(exc, (ImportError, ModuleNotFoundError, OSError)) or (
+        isinstance(exc, RuntimeError)
+        and (
+            "Could not load libtorchcodec" in message
+            or "torchcodec is required but not available" in message
         )
-        return "pyav"
+    )
+
+
+def get_safe_default_codec():
+    torchcodec_available, reason = _probe_torchcodec_runtime()
+    if torchcodec_available:
+        return "torchcodec"
+
+    logging.warning("%s, falling back to 'pyav' as a default decoder", reason)
+    return "pyav"
 
 
 def decode_video_frames(
@@ -147,7 +185,18 @@ def decode_video_frames(
     if backend is None:
         backend = get_safe_default_codec()
     if backend == "torchcodec":
-        return decode_video_frames_torchcodec(video_path, timestamps, tolerance_s)
+        try:
+            return decode_video_frames_torchcodec(video_path, timestamps, tolerance_s)
+        except Exception as exc:
+            if not _is_torchcodec_runtime_failure(exc):
+                raise
+
+            logging.warning(
+                "torchcodec is unavailable at runtime while decoding %s (%s). Falling back to 'pyav'.",
+                video_path,
+                _summarize_exception(exc),
+            )
+            return decode_video_frames_torchvision(video_path, timestamps, tolerance_s, "pyav")
     elif backend in ["pyav", "video_reader"]:
         return decode_video_frames_torchvision(video_path, timestamps, tolerance_s, backend)
     else:
@@ -266,10 +315,11 @@ class VideoDecoderCache:
 
     def get_decoder(self, video_path: str):
         """Get a cached decoder or create a new one."""
-        if importlib.util.find_spec("torchcodec"):
-            from torchcodec.decoders import VideoDecoder
-        else:
-            raise ImportError("torchcodec is required but not available.")
+        torchcodec_available, reason = _probe_torchcodec_runtime()
+        if not torchcodec_available:
+            raise ImportError(reason or "torchcodec is required but not available.")
+
+        from torchcodec.decoders import VideoDecoder
 
         video_path = str(video_path)
 

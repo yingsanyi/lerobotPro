@@ -15,9 +15,11 @@
 from .act.configuration_act import ACTConfig as ACTConfig
 from .diffusion.configuration_diffusion import DiffusionConfig as DiffusionConfig
 from .groot.configuration_groot import GrootConfig as GrootConfig
+from .kcvla.configuration_kcvla import KCVLAConfig as KCVLAConfig
 from .pi0.configuration_pi0 import PI0Config as PI0Config
 from .pi0_fast.configuration_pi0_fast import PI0FastConfig as PI0FastConfig
 from .pi05.configuration_pi05 import PI05Config as PI05Config
+from .s2_pi05.configuration_s2_pi05 import S2PI05Config as S2PI05Config
 from .smolvla.configuration_smolvla import SmolVLAConfig as SmolVLAConfig
 from .smolvla.processor_smolvla import SmolVLANewLineProcessor
 from .tdmpc.configuration_tdmpc import TDMPCConfig as TDMPCConfig
@@ -28,8 +30,10 @@ from .xvla.configuration_xvla import XVLAConfig as XVLAConfig
 __all__ = [
     "ACTConfig",
     "DiffusionConfig",
+    "KCVLAConfig",
     "PI0Config",
     "PI05Config",
+    "S2PI05Config",
     "PI0FastConfig",
     "SmolVLAConfig",
     "SARMConfig",

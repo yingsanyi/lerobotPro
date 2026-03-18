@@ -31,8 +31,10 @@ from lerobot.envs.utils import env_to_policy_features
 from lerobot.policies.act.configuration_act import ACTConfig
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.groot.configuration_groot import GrootConfig
+from lerobot.policies.kcvla.configuration_kcvla import KCVLAConfig
 from lerobot.policies.pi0.configuration_pi0 import PI0Config
 from lerobot.policies.pi05.configuration_pi05 import PI05Config
+from lerobot.policies.s2_pi05.configuration_s2_pi05 import S2PI05Config
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.sac.configuration_sac import SACConfig
 from lerobot.policies.sac.reward_model.configuration_classifier import RewardClassifierConfig
@@ -102,6 +104,14 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from lerobot.policies.pi05.modeling_pi05 import PI05Policy
 
         return PI05Policy
+    elif name == "kcvla":
+        from lerobot.policies.kcvla.modeling_kcvla import KCVLAPolicy
+
+        return KCVLAPolicy
+    elif name == "s2_pi05":
+        from lerobot.policies.s2_pi05.modeling_s2_pi05 import S2PI05Policy
+
+        return S2PI05Policy
     elif name == "sac":
         from lerobot.policies.sac.modeling_sac import SACPolicy
 
@@ -168,6 +178,10 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return PI0Config(**kwargs)
     elif policy_type == "pi05":
         return PI05Config(**kwargs)
+    elif policy_type == "kcvla":
+        return KCVLAConfig(**kwargs)
+    elif policy_type == "s2_pi05":
+        return S2PI05Config(**kwargs)
     elif policy_type == "sac":
         return SACConfig(**kwargs)
     elif policy_type == "smolvla":
@@ -320,6 +334,22 @@ def make_pre_post_processors(
         from lerobot.policies.pi0.processor_pi0 import make_pi0_pre_post_processors
 
         processors = make_pi0_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
+    elif isinstance(policy_cfg, KCVLAConfig):
+        from lerobot.policies.kcvla.processor_kcvla import make_kcvla_pre_post_processors
+
+        processors = make_kcvla_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
+    elif isinstance(policy_cfg, S2PI05Config):
+        from lerobot.policies.s2_pi05.processor_s2_pi05 import make_s2_pi05_pre_post_processors
+
+        processors = make_s2_pi05_pre_post_processors(
             config=policy_cfg,
             dataset_stats=kwargs.get("dataset_stats"),
         )

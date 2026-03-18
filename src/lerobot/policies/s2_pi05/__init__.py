@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 # Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,18 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Client side: The environment evolves with a time resolution equal to 1/fps"""
+from .configuration_s2_pi05 import S2PI05Config
+from .modeling_s2_pi05 import S2PI05Policy
+from .processor_s2_pi05 import make_s2_pi05_pre_post_processors
 
-DEFAULT_FPS = 30
-
-"""Server side: Running inference on (at most) 1/fps"""
-DEFAULT_INFERENCE_LATENCY = 1 / DEFAULT_FPS
-
-"""Server side: Timeout for observation queue in seconds"""
-DEFAULT_OBS_QUEUE_TIMEOUT = 2
-
-# All action chunking policies
-SUPPORTED_POLICIES = ["act", "smolvla", "diffusion", "tdmpc", "vqbet", "pi0", "pi05", "kcvla", "groot"]
-
-# TODO: Add all other robots
-SUPPORTED_ROBOTS = ["so100_follower", "so101_follower", "bi_so_follower", "omx_follower"]
+__all__ = ["S2PI05Config", "S2PI05Policy", "make_s2_pi05_pre_post_processors"]

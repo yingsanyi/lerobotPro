@@ -21,6 +21,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TypedDict, TypeVar, Unpack
 
+import httpx
 import packaging
 import safetensors
 from huggingface_hub import HfApi, ModelCard, ModelCardData, hf_hub_download
@@ -263,7 +264,14 @@ class PreTrainedPolicy(nn.Module, HubMixin, abc.ABC):
             files("lerobot.templates").joinpath("lerobot_modelcard_template.md").read_text(encoding="utf-8")
         )
         card = ModelCard.from_template(card_data, template_str=template_card)
-        card.validate()
+        try:
+            card.validate()
+        except httpx.HTTPError as exc:
+            logging.warning(
+                "Skipping remote Hugging Face model card validation because the validation endpoint is unreachable (%s). "
+                "The model card will still be saved and uploaded.",
+                exc,
+            )
         return card
 
     def wrap_with_peft(
