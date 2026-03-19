@@ -244,10 +244,19 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     )
 
     if cfg.peft is not None:
-        logging.info("Using PEFT! Wrapping model.")
-        # Convert CLI peft config to dict for overrides
-        peft_cli_overrides = dataclasses.asdict(cfg.peft)
-        policy = policy.wrap_with_peft(peft_cli_overrides=peft_cli_overrides)
+        if hasattr(policy, "peft_config"):
+            adapter_name = next(iter(policy.peft_config))
+            logging.info(
+                f"Policy already has a PEFT adapter loaded ({adapter_name}). Enabling adapter training."
+            )
+            policy.set_adapter(adapter_name)
+            policy.set_requires_grad(adapter_name, True)
+            policy.peft_config[adapter_name].inference_mode = False
+        else:
+            logging.info("Using PEFT! Wrapping model.")
+            # Convert CLI peft config to dict for overrides
+            peft_cli_overrides = dataclasses.asdict(cfg.peft)
+            policy = policy.wrap_with_peft(peft_cli_overrides=peft_cli_overrides)
 
     # Wait for all processes to finish policy creation before continuing
     accelerator.wait_for_everyone()
