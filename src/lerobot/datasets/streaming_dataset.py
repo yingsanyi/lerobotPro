@@ -94,6 +94,9 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         seed: int = 42,
         rng: np.random.Generator | None = None,
         shuffle: bool = True,
+        download_max_workers: int | None = None,
+        download_retries: int | None = None,
+        download_retry_backoff_s: float | None = None,
     ):
         """Initialize a StreamingLeRobotDataset.
 
@@ -112,6 +115,9 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
             seed (int, optional): Reproducibility random seed.
             rng (np.random.Generator | None, optional): Random number generator.
             shuffle (bool, optional): Whether to shuffle the dataset across exhaustions. Defaults to True.
+            download_max_workers (int | None, optional): Concurrent workers used by metadata snapshot downloads.
+            download_retries (int | None, optional): Extra retry attempts for transient metadata download failures.
+            download_retry_backoff_s (float | None, optional): Base delay in seconds for exponential retry backoff.
         """
         super().__init__()
         self.repo_id = repo_id
@@ -136,7 +142,13 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
 
         # Load metadata
         self.meta = LeRobotDatasetMetadata(
-            self.repo_id, self.root, self.revision, force_cache_sync=force_cache_sync
+            self.repo_id,
+            self.root,
+            self.revision,
+            force_cache_sync=force_cache_sync,
+            download_max_workers=download_max_workers,
+            download_retries=download_retries,
+            download_retry_backoff_s=download_retry_backoff_s,
         )
         # Check version
         check_version_compatibility(self.repo_id, self.meta._version, CODEBASE_VERSION)

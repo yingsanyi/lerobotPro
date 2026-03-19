@@ -35,6 +35,12 @@ class DatasetConfig:
     use_imagenet_stats: bool = True
     video_backend: str = field(default_factory=get_safe_default_codec)
     streaming: bool = False
+    # Concurrent workers for Hugging Face snapshot downloads. Lower this to 1 on unstable links.
+    download_max_workers: int | None = None
+    # Extra retry attempts for transient Hugging Face download failures.
+    download_retries: int = 3
+    # Base delay in seconds for exponential backoff between retries.
+    download_retry_backoff_s: float = 2.0
 
 
 @dataclass

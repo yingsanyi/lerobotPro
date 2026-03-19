@@ -16,12 +16,16 @@
 import concurrent.futures
 import contextlib
 import logging
+import os
 import shutil
 import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path
 
 import datasets
+import httpcore
+import httpx
 import numpy as np
 import packaging.version
 import pandas as pd
@@ -31,7 +35,7 @@ import pyarrow.parquet as pq
 import torch
 import torch.utils
 from huggingface_hub import HfApi, snapshot_download
-from huggingface_hub.errors import RevisionNotFoundError
+from huggingface_hub.errors import HfHubHTTPError, RevisionNotFoundError
 
 from lerobot.datasets.compute_stats import aggregate_stats, compute_episode_stats
 from lerobot.datasets.image_writer import AsyncImageWriter, write_image
@@ -81,6 +85,123 @@ from lerobot.datasets.video_utils import (
 from lerobot.utils.constants import HF_LEROBOT_HOME
 
 CODEBASE_VERSION = "v3.0"
+HUB_DOWNLOAD_MAX_WORKERS_ENV = "LEROBOT_HUB_DOWNLOAD_MAX_WORKERS"
+HUB_DOWNLOAD_RETRIES_ENV = "LEROBOT_HUB_DOWNLOAD_RETRIES"
+HUB_DOWNLOAD_RETRY_BACKOFF_S_ENV = "LEROBOT_HUB_DOWNLOAD_RETRY_BACKOFF_S"
+DEFAULT_HUB_DOWNLOAD_RETRIES = 3
+DEFAULT_HUB_DOWNLOAD_RETRY_BACKOFF_S = 2.0
+
+
+def _get_env_int(name: str) -> int | None:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        logging.warning("Ignoring invalid %s=%r. Expected an integer.", name, value)
+        return None
+
+
+def _get_env_float(name: str) -> float | None:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        logging.warning("Ignoring invalid %s=%r. Expected a float.", name, value)
+        return None
+
+
+def _resolve_download_max_workers(download_max_workers: int | None) -> int | None:
+    resolved = (
+        download_max_workers
+        if download_max_workers is not None
+        else _get_env_int(HUB_DOWNLOAD_MAX_WORKERS_ENV)
+    )
+    if resolved is not None and resolved < 1:
+        raise ValueError("download_max_workers must be >= 1")
+    return resolved
+
+
+def _resolve_download_retries(download_retries: int | None) -> int:
+    resolved = (
+        download_retries if download_retries is not None else _get_env_int(HUB_DOWNLOAD_RETRIES_ENV)
+    )
+    if resolved is None:
+        resolved = DEFAULT_HUB_DOWNLOAD_RETRIES
+    if resolved < 0:
+        raise ValueError("download_retries must be >= 0")
+    return resolved
+
+
+def _resolve_download_retry_backoff_s(download_retry_backoff_s: float | None) -> float:
+    resolved = (
+        download_retry_backoff_s
+        if download_retry_backoff_s is not None
+        else _get_env_float(HUB_DOWNLOAD_RETRY_BACKOFF_S_ENV)
+    )
+    if resolved is None:
+        resolved = DEFAULT_HUB_DOWNLOAD_RETRY_BACKOFF_S
+    if resolved < 0:
+        raise ValueError("download_retry_backoff_s must be >= 0")
+    return resolved
+
+
+def _should_retry_hub_http_error(exc: HfHubHTTPError) -> bool:
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    return status_code is not None and (status_code >= 500 or status_code in {408, 429})
+
+
+def _snapshot_download_with_retries(
+    *,
+    download_max_workers: int | None = None,
+    download_retries: int | None = None,
+    download_retry_backoff_s: float | None = None,
+    **snapshot_kwargs,
+) -> str:
+    repo_id = snapshot_kwargs.get("repo_id", "<unknown>")
+    base_max_workers = _resolve_download_max_workers(download_max_workers)
+    retries = _resolve_download_retries(download_retries)
+    backoff_s = _resolve_download_retry_backoff_s(download_retry_backoff_s)
+    total_attempts = retries + 1
+
+    for attempt in range(total_attempts):
+        attempt_max_workers = base_max_workers
+        if attempt > 0 and (attempt_max_workers is None or attempt_max_workers > 1):
+            attempt_max_workers = 1
+
+        download_kwargs = dict(snapshot_kwargs)
+        if attempt_max_workers is not None:
+            download_kwargs["max_workers"] = attempt_max_workers
+
+        try:
+            return snapshot_download(**download_kwargs)
+        except HfHubHTTPError as exc:
+            if attempt >= retries or not _should_retry_hub_http_error(exc):
+                raise
+            error_message = str(exc)
+        except (httpx.TransportError, httpcore.NetworkError, httpcore.TimeoutException) as exc:
+            if attempt >= retries:
+                raise
+            error_message = str(exc)
+
+        delay_s = min(backoff_s * (2**attempt), 60.0)
+        logging.warning(
+            "Transient Hugging Face download failure for %s on attempt %s/%s. "
+            "Retrying in %.1fs with max_workers=%s. Error: %s",
+            repo_id,
+            attempt + 1,
+            total_attempts,
+            delay_s,
+            attempt_max_workers if attempt_max_workers is not None else "default",
+            error_message,
+        )
+        time.sleep(delay_s)
+
+    raise RuntimeError(f"Unreachable download retry state for {repo_id}")
 
 
 class LeRobotDatasetMetadata:
@@ -91,6 +212,9 @@ class LeRobotDatasetMetadata:
         revision: str | None = None,
         force_cache_sync: bool = False,
         metadata_buffer_size: int = 10,
+        download_max_workers: int | None = None,
+        download_retries: int | None = None,
+        download_retry_backoff_s: float | None = None,
     ):
         self.repo_id = repo_id
         self.revision = revision if revision else CODEBASE_VERSION
@@ -99,6 +223,9 @@ class LeRobotDatasetMetadata:
         self.latest_episode = None
         self.metadata_buffer: list[dict] = []
         self.metadata_buffer_size = metadata_buffer_size
+        self.download_max_workers = _resolve_download_max_workers(download_max_workers)
+        self.download_retries = _resolve_download_retries(download_retries)
+        self.download_retry_backoff_s = _resolve_download_retry_backoff_s(download_retry_backoff_s)
 
         try:
             if force_cache_sync:
@@ -173,13 +300,16 @@ class LeRobotDatasetMetadata:
         allow_patterns: list[str] | str | None = None,
         ignore_patterns: list[str] | str | None = None,
     ) -> None:
-        snapshot_download(
-            self.repo_id,
+        _snapshot_download_with_retries(
+            repo_id=self.repo_id,
             repo_type="dataset",
             revision=self.revision,
             local_dir=self.root,
             allow_patterns=allow_patterns,
             ignore_patterns=ignore_patterns,
+            download_max_workers=self.download_max_workers,
+            download_retries=self.download_retries,
+            download_retry_backoff_s=self.download_retry_backoff_s,
         )
 
     @property
@@ -581,6 +711,9 @@ class LeRobotDataset(torch.utils.data.Dataset):
         streaming_encoding: bool = False,
         encoder_queue_maxsize: int = 30,
         encoder_threads: int | None = None,
+        download_max_workers: int | None = None,
+        download_retries: int | None = None,
+        download_retry_backoff_s: float | None = None,
     ):
         """
         2 modes are available for instantiating this class, depending on 2 different use cases:
@@ -703,6 +836,12 @@ class LeRobotDataset(torch.utils.data.Dataset):
             encoder_threads (int | None, optional): Number of threads per encoder instance. None lets the
                 codec auto-detect (default). Lower values reduce CPU usage per encoder. Maps to 'lp' (via svtav1-params) for
                 libsvtav1 and 'threads' for h264/hevc.
+            download_max_workers (int | None, optional): Concurrent workers used by Hugging Face snapshot
+                downloads. Retries automatically fall back to a single worker for stability.
+            download_retries (int | None, optional): Extra retry attempts for transient Hugging Face download
+                failures. Defaults to 3 unless overridden by environment.
+            download_retry_backoff_s (float | None, optional): Base delay in seconds for exponential download
+                retry backoff. Defaults to 2.0 unless overridden by environment.
         """
         super().__init__()
         self.repo_id = repo_id
@@ -718,6 +857,9 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self.episodes_since_last_encoding = 0
         self.vcodec = resolve_vcodec(vcodec)
         self._encoder_threads = encoder_threads
+        self.download_max_workers = _resolve_download_max_workers(download_max_workers)
+        self.download_retries = _resolve_download_retries(download_retries)
+        self.download_retry_backoff_s = _resolve_download_retry_backoff_s(download_retry_backoff_s)
 
         # Unused attributes
         self.image_writer = None
@@ -731,7 +873,13 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
         # Load metadata
         self.meta = LeRobotDatasetMetadata(
-            self.repo_id, self.root, self.revision, force_cache_sync=force_cache_sync
+            self.repo_id,
+            self.root,
+            self.revision,
+            force_cache_sync=force_cache_sync,
+            download_max_workers=self.download_max_workers,
+            download_retries=self.download_retries,
+            download_retry_backoff_s=self.download_retry_backoff_s,
         )
 
         # Track dataset state for efficient incremental writing
@@ -853,13 +1001,16 @@ class LeRobotDataset(torch.utils.data.Dataset):
         allow_patterns: list[str] | str | None = None,
         ignore_patterns: list[str] | str | None = None,
     ) -> None:
-        snapshot_download(
-            self.repo_id,
+        _snapshot_download_with_retries(
+            repo_id=self.repo_id,
             repo_type="dataset",
             revision=self.revision,
             local_dir=self.root,
             allow_patterns=allow_patterns,
             ignore_patterns=ignore_patterns,
+            download_max_workers=self.download_max_workers,
+            download_retries=self.download_retries,
+            download_retry_backoff_s=self.download_retry_backoff_s,
         )
 
     def download(self, download_videos: bool = True) -> None:
