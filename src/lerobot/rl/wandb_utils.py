@@ -16,7 +16,9 @@
 import logging
 import os
 import re
+from collections.abc import Sequence
 from glob import glob
+from numbers import Real
 from pathlib import Path
 
 from huggingface_hub.constants import SAFETENSORS_SINGLE_FILE
@@ -69,6 +71,25 @@ def get_wandb_run_id_from_filesystem(log_dir: Path) -> str:
 def get_safe_wandb_artifact_name(name: str):
     """WandB artifacts don't accept ":" or "/" in their name."""
     return name.replace(":", "_").replace("/", "_")
+
+
+def _is_scalar_wandb_value(value) -> bool:
+    return isinstance(value, (Real, str)) and not isinstance(value, bool)
+
+
+def _expand_wandb_metric(key: str, value) -> dict[str, int | float | str] | None:
+    if _is_scalar_wandb_value(value):
+        return {key: value}
+
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        expanded = {}
+        for index, item in enumerate(value):
+            if not _is_scalar_wandb_value(item):
+                return None
+            expanded[f"{key}/{index}"] = item
+        return expanded
+
+    return None
 
 
 class WandBLogger:
@@ -177,7 +198,8 @@ class WandBLogger:
                 self._wandb.define_metric(new_custom_key, hidden=True)
 
         for k, v in d.items():
-            if not isinstance(v, (int | float | str)):
+            expanded_metrics = _expand_wandb_metric(k, v)
+            if expanded_metrics is None:
                 logging.warning(
                     f'WandB logging of key "{k}" was ignored as its type "{type(v)}" is not handled by this wrapper.'
                 )
@@ -189,11 +211,15 @@ class WandBLogger:
 
             if custom_step_key is not None:
                 value_custom_step = d[custom_step_key]
-                data = {f"{mode}/{k}": v, f"{mode}/{custom_step_key}": value_custom_step}
+                data = {f"{mode}/{name}": metric for name, metric in expanded_metrics.items()}
+                data[f"{mode}/{custom_step_key}"] = value_custom_step
                 self._wandb.log(data)
                 continue
 
-            self._wandb.log(data={f"{mode}/{k}": v}, step=step)
+            self._wandb.log(
+                data={f"{mode}/{name}": metric for name, metric in expanded_metrics.items()},
+                step=step,
+            )
 
     def log_video(self, video_path: str, step: int, mode: str = "train"):
         if mode not in {"train", "eval"}:
