@@ -15,6 +15,7 @@ import argparse
 import ast
 import glob
 import io
+import json
 import math
 import os
 import platform
@@ -39,16 +40,53 @@ from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
 from lerobot.cameras.utils import make_cameras_from_configs
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.video_utils import VideoEncodingManager
+from lerobot.robots.songling_follower.protocol import (
+    ARM_GRIPPER_CTRL,
+    ARM_GRIPPER_FEEDBACK,
+    ARM_JOINT_CTRL_12,
+    ARM_JOINT_CTRL_34,
+    ARM_JOINT_CTRL_56,
+    ARM_JOINT_FEEDBACK_12,
+    ARM_JOINT_FEEDBACK_34,
+    ARM_JOINT_FEEDBACK_56,
+    decode_gripper_feedback as decode_piper_gripper_feedback,
+    decode_joint_feedback as decode_piper_joint_feedback,
+)
 from lerobot.utils.control_utils import init_keyboard_listener
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import log_say
+try:
+    from songling_protocol import (
+        DEFAULT_SONGLING_STATE_IDS,
+        decode_known_state,
+        is_known_state_id,
+    )
+except ModuleNotFoundError:
+    from examples.songling_aloha.songling_protocol import (
+        DEFAULT_SONGLING_STATE_IDS,
+        decode_known_state,
+        is_known_state_id,
+    )
 
 CAMERA_KEYS = ("left_high", "left_elbow", "right_elbow")
 DEFAULT_JOINT_NAMES = ("joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "gripper")
-DEFAULT_OBSERVATION_IDS = "0x251,0x252,0x253,0x254,0x255,0x256,0x257"
-DEFAULT_ACTION_IDS = "0x2A1,0x2A2,0x2A3,0x2A4,0x2A5,0x2A6,0x2A7"
+PIPER_OBSERVATION_FRAME_IDS = (
+    ARM_JOINT_FEEDBACK_12,
+    ARM_JOINT_FEEDBACK_34,
+    ARM_JOINT_FEEDBACK_56,
+    ARM_GRIPPER_FEEDBACK,
+)
+PIPER_ACTION_FRAME_IDS = (
+    ARM_JOINT_CTRL_12,
+    ARM_JOINT_CTRL_34,
+    ARM_JOINT_CTRL_56,
+    ARM_GRIPPER_CTRL,
+)
+DEFAULT_OBSERVATION_IDS = ",".join(hex(v) for v in PIPER_OBSERVATION_FRAME_IDS)
+DEFAULT_ACTION_IDS = ",".join(hex(v) for v in PIPER_ACTION_FRAME_IDS)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATASET_ROOT = PROJECT_ROOT / "outputs" / "songling_aloha"
+CAPTURE_SUMMARY_FILENAME = "songling_recording_summary.json"
 LOCAL_PIPER_BINARY = PROJECT_ROOT / "third_party" / "piper" / "piper" / "piper"
 LOCAL_PIPER_MODELS_DIR = PROJECT_ROOT / "third_party" / "piper" / "models"
 VOICE_ENGINE_CHOICES = ("auto", "piper", "spd-say", "espeak-ng", "espeak", "tone", "log-say", "bell", "off")
@@ -164,6 +202,7 @@ class SideCANRuntime:
 class CANBusState:
     latest: dict[int, float] = field(default_factory=dict)
     latest_ts: dict[int, float] = field(default_factory=dict)
+    latest_payload: dict[int, bytes] = field(default_factory=dict)
     seen_ids: set[int] = field(default_factory=set)
     total_msgs: int = 0
     recent_timestamps: deque[float] = field(default_factory=lambda: deque(maxlen=4096))
@@ -176,6 +215,111 @@ def _parse_cli_bool(value: str) -> bool:
     if normalized in {"0", "false", "no", "n", "off"}:
         return False
     raise ValueError(f"Invalid boolean value: {value}. Use true/false.")
+
+
+def _capture_summary_path(root: Path) -> Path:
+    return root / "meta" / CAPTURE_SUMMARY_FILENAME
+
+
+def _load_capture_summary(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _parse_hex_ids(values: Any) -> set[int]:
+    if not isinstance(values, list):
+        return set()
+
+    out: set[int] = set()
+    for value in values:
+        try:
+            out.add(int(str(value), 0))
+        except Exception:
+            continue
+    return out
+
+
+def _format_hex_ids(values: set[int]) -> list[str]:
+    return [hex(v) for v in sorted(values)]
+
+
+def _finalize_action_source_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    frames = int(summary.get("frames", 0))
+    left_control = int(summary.get("left_control_frames", 0))
+    right_control = int(summary.get("right_control_frames", 0))
+    if frames < 0:
+        frames = 0
+
+    summary["frames"] = frames
+    summary["left_fallback_frames"] = max(frames - left_control, 0)
+    summary["right_fallback_frames"] = max(frames - right_control, 0)
+    summary["left_control_ratio"] = (left_control / frames) if frames > 0 else 0.0
+    summary["right_control_ratio"] = (right_control / frames) if frames > 0 else 0.0
+    return summary
+
+
+def _write_capture_summary(
+    *,
+    root: Path,
+    repo_id: str,
+    joint_names: list[str],
+    left_can: SideCANRuntime,
+    right_can: SideCANRuntime,
+    episode_summaries: list[dict[str, Any]],
+    left_seen_ids: set[int],
+    right_seen_ids: set[int],
+) -> Path:
+    summary_path = _capture_summary_path(root)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing = _load_capture_summary(summary_path)
+    existing_episodes = existing.get("episodes")
+    episode_map: dict[int, dict[str, Any]] = {}
+    if isinstance(existing_episodes, list):
+        for entry in existing_episodes:
+            if isinstance(entry, dict) and "episode_index" in entry:
+                try:
+                    episode_map[int(entry["episode_index"])] = dict(entry)
+                except Exception:
+                    continue
+
+    for entry in episode_summaries:
+        episode_map[int(entry["episode_index"])] = _finalize_action_source_summary(dict(entry))
+
+    existing_seen = existing.get("seen_ids") if isinstance(existing.get("seen_ids"), dict) else {}
+    merged_left_seen = left_seen_ids | _parse_hex_ids(existing_seen.get("left"))
+    merged_right_seen = right_seen_ids | _parse_hex_ids(existing_seen.get("right"))
+
+    payload = {
+        "schema_version": 1,
+        "repo_id": repo_id,
+        "dataset_root": str(root),
+        "joint_names_per_side": list(joint_names),
+        "units": {
+            "arm_joint_storage": "degree",
+            "gripper_storage": "mm",
+            "protocol_reference": "Piper-style Songling CAN: joints are 0.001 degree, gripper is 0.001 mm.",
+            "mobile_aloha_projection": "Convert joints degree->rad and gripper mm->[0,1] by dividing with the verified gripper max stroke.",
+        },
+        "can_frame_ids": {
+            "left_observation": [hex(v) for v in left_can.observation_ids],
+            "right_observation": [hex(v) for v in right_can.observation_ids],
+            "left_action": [hex(v) for v in left_can.action_ids],
+            "right_action": [hex(v) for v in right_can.action_ids],
+        },
+        "episodes": [episode_map[idx] for idx in sorted(episode_map)],
+        "seen_ids": {
+            "left": _format_hex_ids(merged_left_seen),
+            "right": _format_hex_ids(merged_right_seen),
+        },
+    }
+    summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return summary_path
 
 
 def _parse_optional_int(value: str) -> int | None:
@@ -1199,6 +1343,14 @@ def _decode_signal(data: bytes, decode: CANDecodeOptions) -> float | None:
     return (float(raw) * decode.scale) + decode.bias
 
 
+def _decode_songling_or_fallback(arbitration_id: int, data: bytes, decode: CANDecodeOptions) -> float | None:
+    if is_known_state_id(arbitration_id):
+        decoded = decode_known_state(arbitration_id, data)
+        if decoded is not None:
+            return decoded
+    return _decode_signal(data, decode)
+
+
 def _open_raw_can_bus(interface: str, bitrate: int, use_fd: bool, data_bitrate: int | None):
     import can
 
@@ -1222,8 +1374,9 @@ def _poll_can_state(bus, state: CANBusState, decode: CANDecodeOptions, max_msgs:
         state.total_msgs += 1
         state.recent_timestamps.append(now)
         state.seen_ids.add(msg.arbitration_id)
+        state.latest_payload[msg.arbitration_id] = bytes(msg.data)
 
-        decoded = _decode_signal(msg.data, decode)
+        decoded = _decode_songling_or_fallback(msg.arbitration_id, msg.data, decode)
         if decoded is not None:
             state.latest[msg.arbitration_id] = decoded
             state.latest_ts[msg.arbitration_id] = now
@@ -1248,6 +1401,84 @@ def _values_from_ids(ids: list[int], state: CANBusState, last_values: np.ndarray
             value = float(last_values[i])
         out[i] = value
     return out
+
+
+def _decode_piper_observation_vector(
+    configured_frame_ids: list[int],
+    state: CANBusState,
+    last_values: np.ndarray,
+) -> np.ndarray:
+    out = np.array(last_values, copy=True)
+    allowed = set(configured_frame_ids)
+
+    for arbitration_id in (ARM_JOINT_FEEDBACK_12, ARM_JOINT_FEEDBACK_34, ARM_JOINT_FEEDBACK_56):
+        if arbitration_id not in allowed:
+            continue
+        payload = state.latest_payload.get(arbitration_id)
+        if payload is None:
+            continue
+        try:
+            decoded = decode_piper_joint_feedback(arbitration_id, payload)
+        except Exception:
+            continue
+        for idx, joint_name in enumerate(DEFAULT_JOINT_NAMES[:6]):
+            if joint_name in decoded:
+                out[idx] = float(decoded[joint_name]) * 1e-3
+
+    if ARM_GRIPPER_FEEDBACK in allowed:
+        payload = state.latest_payload.get(ARM_GRIPPER_FEEDBACK)
+        if payload is not None:
+            try:
+                decoded_gripper = decode_piper_gripper_feedback(payload)
+                out[6] = float(decoded_gripper.position) * 1e-3
+            except Exception:
+                pass
+
+    last_values[:] = out
+    return out
+
+
+def _decode_piper_action_vector(
+    configured_frame_ids: list[int],
+    state: CANBusState,
+    last_values: np.ndarray,
+    *,
+    fallback_observation: np.ndarray | None = None,
+) -> tuple[np.ndarray, bool]:
+    out = np.array(last_values, copy=True)
+    allowed = set(configured_frame_ids)
+    saw_control_frame = False
+    index_map = {name: idx for idx, name in enumerate(DEFAULT_JOINT_NAMES)}
+
+    control_pairs = {
+        ARM_JOINT_CTRL_12: ("joint_1", "joint_2"),
+        ARM_JOINT_CTRL_34: ("joint_3", "joint_4"),
+        ARM_JOINT_CTRL_56: ("joint_5", "joint_6"),
+    }
+    for arbitration_id, joint_names in control_pairs.items():
+        if arbitration_id not in allowed:
+            continue
+        payload = state.latest_payload.get(arbitration_id)
+        if payload is None or len(payload) < 8:
+            continue
+        first = int.from_bytes(payload[0:4], byteorder="big", signed=True)
+        second = int.from_bytes(payload[4:8], byteorder="big", signed=True)
+        out[index_map[joint_names[0]]] = float(first) * 1e-3
+        out[index_map[joint_names[1]]] = float(second) * 1e-3
+        saw_control_frame = True
+
+    if ARM_GRIPPER_CTRL in allowed:
+        payload = state.latest_payload.get(ARM_GRIPPER_CTRL)
+        if payload is not None and len(payload) >= 8:
+            gripper_pos = int.from_bytes(payload[0:4], byteorder="big", signed=True)
+            out[index_map["gripper"]] = float(gripper_pos) * 1e-3
+            saw_control_frame = True
+
+    if not saw_control_frame and fallback_observation is not None:
+        out = np.asarray(fallback_observation, dtype=np.float32).copy()
+
+    last_values[:] = out
+    return out, saw_control_frame
 
 
 def _read_camera_frames(
@@ -1669,17 +1900,14 @@ def _resolve_hardware(
     left_action_ids = _parse_id_list(args.left_action_ids) if args.left_action_ids else list(default_action_ids)
     right_action_ids = _parse_id_list(args.right_action_ids) if args.right_action_ids else list(default_action_ids)
 
-    expected = len(joint_names)
     for ids, label in (
         (left_obs_ids, "left observation ids"),
         (right_obs_ids, "right observation ids"),
         (left_action_ids, "left action ids"),
         (right_action_ids, "right action ids"),
     ):
-        if len(ids) != expected:
-            raise ValueError(
-                f"Length mismatch: {label} has {len(ids)} ids but joint names has {expected} entries."
-            )
+        if len(ids) == 0:
+            raise ValueError(f"{label} must contain at least one CAN frame id.")
 
     left_cams = _expect_dict(left_arm.get("cameras"), "robot.left_arm_config.cameras")
     right_cams = _expect_dict(right_arm.get("cameras"), "robot.right_arm_config.cameras")
@@ -1780,17 +2008,17 @@ def main() -> None:
     parser.add_argument(
         "--observation-ids",
         default=DEFAULT_OBSERVATION_IDS,
-        help="Default CAN ids mapped to observation joints (comma-separated, hex or decimal).",
+        help="Default CAN frame ids used to decode Piper-style observation joints (comma-separated, hex or decimal).",
     )
     parser.add_argument(
         "--action-ids",
         default=DEFAULT_ACTION_IDS,
-        help="Default CAN ids mapped to action joints (comma-separated, hex or decimal).",
+        help="Default CAN frame ids used to decode Piper-style action targets (comma-separated, hex or decimal).",
     )
-    parser.add_argument("--left-observation-ids", default=None, help="Override left side observation ids.")
-    parser.add_argument("--right-observation-ids", default=None, help="Override right side observation ids.")
-    parser.add_argument("--left-action-ids", default=None, help="Override left side action ids.")
-    parser.add_argument("--right-action-ids", default=None, help="Override right side action ids.")
+    parser.add_argument("--left-observation-ids", default=None, help="Override left side observation frame ids.")
+    parser.add_argument("--right-observation-ids", default=None, help="Override right side observation frame ids.")
+    parser.add_argument("--left-action-ids", default=None, help="Override left side action frame ids.")
+    parser.add_argument("--right-action-ids", default=None, help="Override right side action frame ids.")
 
     parser.add_argument("--decode-byte-offset", type=int, default=0, help="CAN payload byte offset for decoding.")
     parser.add_argument(
@@ -2207,6 +2435,10 @@ def main() -> None:
     right_obs_last = np.zeros((len(joint_names),), dtype=np.float32)
     left_action_last = np.zeros((len(joint_names),), dtype=np.float32)
     right_action_last = np.zeros((len(joint_names),), dtype=np.float32)
+    left_warned_action_fallback = False
+    right_warned_action_fallback = False
+    episode_action_source_summaries: list[dict[str, Any]] = []
+    current_episode_summary: dict[str, Any] | None = None
     last_camera_frames: dict[str, np.ndarray] = {}
     camera_stale_counts: dict[str, int] = {}
     camera_identical_counts: dict[str, int] = {}
@@ -2268,6 +2500,12 @@ def main() -> None:
         with VideoEncodingManager(dataset):
             while saved_episodes < dataset_opts.num_episodes and not events["stop_recording"]:
                 episode_idx = dataset.num_episodes
+                current_episode_summary = {
+                    "episode_index": int(episode_idx),
+                    "frames": 0,
+                    "left_control_frames": 0,
+                    "right_control_frames": 0,
+                }
                 _say_event("recording_episode", dataset_opts, episode_idx=episode_idx)
                 print(f"\n[INFO] Recording episode {episode_idx} ...")
                 ep_start = time.perf_counter()
@@ -2303,10 +2541,34 @@ def main() -> None:
                         camera_fail_on_freeze=args.camera_fail_on_freeze,
                     )
 
-                    left_obs = _values_from_ids(left_can.observation_ids, left_state, left_obs_last)
-                    right_obs = _values_from_ids(right_can.observation_ids, right_state, right_obs_last)
-                    left_action = _values_from_ids(left_can.action_ids, left_state, left_action_last)
-                    right_action = _values_from_ids(right_can.action_ids, right_state, right_action_last)
+                    left_obs = _decode_piper_observation_vector(left_can.observation_ids, left_state, left_obs_last)
+                    right_obs = _decode_piper_observation_vector(
+                        right_can.observation_ids, right_state, right_obs_last
+                    )
+                    left_action, left_has_control = _decode_piper_action_vector(
+                        left_can.action_ids,
+                        left_state,
+                        left_action_last,
+                        fallback_observation=left_obs,
+                    )
+                    right_action, right_has_control = _decode_piper_action_vector(
+                        right_can.action_ids,
+                        right_state,
+                        right_action_last,
+                        fallback_observation=right_obs,
+                    )
+                    if not left_has_control and not left_warned_action_fallback:
+                        print(
+                            "[WARN] Left side control frames were not observed. "
+                            "Using observation feedback as dataset action."
+                        )
+                        left_warned_action_fallback = True
+                    if not right_has_control and not right_warned_action_fallback:
+                        print(
+                            "[WARN] Right side control frames were not observed. "
+                            "Using observation feedback as dataset action."
+                        )
+                        right_warned_action_fallback = True
                     left_hz = _rx_hz(left_state.recent_timestamps)
                     right_hz = _rx_hz(right_state.recent_timestamps)
 
@@ -2323,6 +2585,14 @@ def main() -> None:
                     dataset.add_frame(frame)
                     ep_frames += 1
                     frames_total += 1
+                    if current_episode_summary is not None:
+                        current_episode_summary["frames"] = int(current_episode_summary["frames"]) + 1
+                        current_episode_summary["left_control_frames"] = int(
+                            current_episode_summary["left_control_frames"]
+                        ) + int(left_has_control)
+                        current_episode_summary["right_control_frames"] = int(
+                            current_episode_summary["right_control_frames"]
+                        ) + int(right_has_control)
 
                     if display_opts.display_data and rr is not None:
                         rr.set_time("frame", sequence=frames_total)
@@ -2362,10 +2632,12 @@ def main() -> None:
                     events["rerecord_episode"] = False
                     events["exit_early"] = False
                     dataset.clear_episode_buffer()
+                    current_episode_summary = None
                     print(f"[INFO] Discarded episode {episode_idx}, re-recording.")
                     continue
 
                 if dataset.episode_buffer is None or dataset.episode_buffer.get("size", 0) == 0:
+                    current_episode_summary = None
                     print(f"[WARN] Episode {episode_idx} has no frames; skipping save.")
                     if events["stop_recording"]:
                         break
@@ -2376,6 +2648,9 @@ def main() -> None:
 
                 dataset.save_episode()
                 saved_episodes += 1
+                if current_episode_summary is not None:
+                    episode_action_source_summaries.append(_finalize_action_source_summary(current_episode_summary))
+                    current_episode_summary = None
                 _say_event("saved_episode", dataset_opts, episode_idx=episode_idx)
                 print(f"[INFO] Saved episode {episode_idx} ({ep_frames} frames).")
 
@@ -2397,11 +2672,25 @@ def main() -> None:
         if dataset is not None and dataset.episode_buffer is not None and dataset.episode_buffer.get("size", 0) > 0:
             dataset.save_episode()
             saved_episodes += 1
+            if current_episode_summary is not None:
+                episode_action_source_summaries.append(_finalize_action_source_summary(current_episode_summary))
+                current_episode_summary = None
             print("[INFO] Saved partial episode buffer before exit.")
     finally:
         _say_event("stop_recording", dataset_opts, blocking=True)
         if dataset is not None:
             dataset.finalize()
+            summary_path = _write_capture_summary(
+                root=dataset_opts.root,
+                repo_id=dataset_opts.repo_id,
+                joint_names=joint_names,
+                left_can=left_can,
+                right_can=right_can,
+                episode_summaries=episode_action_source_summaries,
+                left_seen_ids=left_state.seen_ids,
+                right_seen_ids=right_state.seen_ids,
+            )
+            print(f"[INFO] Wrote action-source summary: {summary_path}")
             if dataset_opts.push_to_hub:
                 dataset.push_to_hub(tags=dataset_opts.tags, private=dataset_opts.private)
                 print("[INFO] Dataset pushed to Hugging Face Hub.")

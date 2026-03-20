@@ -1,0 +1,56 @@
+robot:
+  type: bi_songling_follower
+  id: songling_aloha_runtime
+  calibration_dir: outputs/songling_aloha_calibration
+  left_arm_config:
+    port: can1
+    side: left
+    use_can_fd: false
+    can_bitrate: 1000000
+    can_data_bitrate: 5000000
+    allow_unverified_commanding: false
+    auto_enable_on_connect: true
+    auto_configure_mode_on_connect: true
+    move_spd_rate_ctrl: 20
+    max_relative_target: 5.0
+    cameras:
+      high:
+        type: opencv
+        index_or_path: /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._Dabai_DC1_CC1S74101GJ-video-index0
+        width: 640
+        height: 480
+        fps: 30
+        fourcc: MJPG
+        backend: 200
+      elbow:
+        type: opencv
+        index_or_path: /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._USB_2.0_Camera_AU1GC32017T-video-index0
+        width: 640
+        height: 480
+        fps: 30
+        fourcc: MJPG
+        backend: 200
+  right_arm_config:
+    port: can0
+    side: right
+    use_can_fd: false
+    can_bitrate: 1000000
+    can_data_bitrate: 5000000
+    allow_unverified_commanding: false
+    auto_enable_on_connect: true
+    auto_configure_mode_on_connect: true
+    move_spd_rate_ctrl: 20
+    max_relative_target: 5.0
+    cameras:
+      elbow:
+        type: opencv
+        index_or_path: /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._Dabai_DC1_CC1S74101GY-video-index0
+        width: 640
+        height: 480
+        fps: 30
+        fourcc: MJPG
+        backend: 200
+
+fps: 30
+display_data: true
+display_compressed_images: false

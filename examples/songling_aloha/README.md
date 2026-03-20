@@ -37,6 +37,37 @@ Then analyze `/tmp/songling_can_sniff/can0.csv` and `can1.csv` to map:
 
 Once those are confirmed, implement/extend a dedicated custom MotorsBus adapter.
 
+The current repo now includes a heuristic Songling RX decoder for the observed
+state frames, but it is still an evolving best-effort mapping, not a confirmed
+vendor protocol specification.
+
+For a more structured workflow, capture one idle segment and one motion segment,
+then diff them:
+
+```bash
+python examples/songling_aloha/sniff_can_frames.py \
+  --interfaces can0 can1 \
+  --duration-s 20 \
+  --bitrate 1000000 \
+  --output-dir /tmp/songling_can_idle
+
+python examples/songling_aloha/sniff_can_frames.py \
+  --interfaces can0 can1 \
+  --duration-s 20 \
+  --bitrate 1000000 \
+  --output-dir /tmp/songling_can_move
+
+python examples/songling_aloha/analyze_can_sniff.py \
+  --idle-dir /tmp/songling_can_idle \
+  --active-dir /tmp/songling_can_move
+```
+
+Recommended capture procedure:
+
+- For `idle`, keep both sides powered on but do not move the arms.
+- For `move`, manually move only one side or one joint group at a time if possible.
+- Save separate motion captures for left-only, right-only, gripper-only, etc. if you want cleaner protocol separation.
+
 ## 1) Environment and dependencies
 
 Use the existing conda environment:
@@ -283,41 +314,35 @@ python examples/songling_aloha/visualize_teleop_live.py \
 `examples/songling_aloha/teleop.yaml` now carries default dataset recording fields too, so you can use
 LeRobot-native record flags while keeping one unified config.
 
-Use native `lerobot-record` syntax and fallback to YAML defaults for fields you do not override:
+For the integrated Songling chain used in this repo, the recommended entry point is still
+`record_compat.py`. It accepts the same dotted `lerobot-record`-style overrides, auto-injects the
+default Songling config path, and when it detects the integrated CAN layout it forwards to the
+raw-CAN recorder automatically.
+
+Typical fixed-root collection command:
 
 ```bash
-lerobot-record \
-  --config_path examples/songling_aloha/teleop.yaml \
+python examples/songling_aloha/record_compat.py \
+  --config_path=examples/songling_aloha/teleop.yaml \
   --dataset.repo_id=your_hf_username/songling_aloha_demo \
-  --dataset.single_task="Bimanual teleoperation with Songling ALOHA profile"
+  --dataset.root=outputs/songling_aloha_run_001 \
+  --dataset.single_task="Your operation instructions" \
+  --dataset.num_episodes=20 \
+  --dataset.episode_time_s=30 \
+  --dataset.reset_time_s=15 \
+  --dataset.push_to_hub=false
 ```
 
-The full original style command is also supported (all values explicitly provided):
+If you want to reuse an existing directory exactly instead of auto-incrementing to a new suffix,
+add these flags:
 
 ```bash
-lerobot-record \
-  --robot.type=bi_openarm_follower \
-  --robot.id=songling_aloha_follower \
-  --robot.left_arm_config.port=can1 \
-  --robot.right_arm_config.port=can0 \
-  --robot.left_arm_config.cameras.high="{type: opencv, index_or_path: /dev/video4, width: 640, height: 480, fps: 30}" \
-  --robot.left_arm_config.cameras.elbow="{type: opencv, index_or_path: /dev/video0, width: 640, height: 480, fps: 30}" \
-  --robot.right_arm_config.cameras.elbow="{type: opencv, index_or_path: /dev/video2, width: 640, height: 480, fps: 30}" \
-  --teleop.type=bi_openarm_leader \
-  --teleop.id=songling_aloha_leader \
-  --teleop.left_arm_config.port=can1 \
-  --teleop.right_arm_config.port=can0 \
-  --display_data=true \
-  --dataset.repo_id=your_hf_username/songling_aloha_demo \
-  --dataset.push_to_hub=true \
-  --dataset.num_episodes=60 \
-  --dataset.episode_time_s=60 \
-  --dataset.single_task="Bimanual teleoperation with Songling ALOHA profile" \
-  --dataset.root="outputs/songling_aloha" \
-  --dataset.reset_time_s=60
+--resume=false \
+--dataset.auto_increment_root=false
 ```
 
-For convenience, this wrapper forwards the same `lerobot-record` arguments and auto-injects the default Songling config path:
+If you only want the shortest local command and are happy with YAML defaults for anything you do not
+override:
 
 ```bash
 python examples/songling_aloha/record_compat.py \
@@ -340,9 +365,174 @@ Voice settings (`play_sounds`, `voice_*`) continue to come from `examples/songli
 and can be overridden from CLI.
 Choose a writable path under your user directory or repo workspace, not a protected mount point without write permission.
 
-`lerobot-replay` with integrated Songling chains is still considered future work until a dedicated protocol adapter is merged.
+The underlying raw-CAN recorder writes `meta/songling_recording_summary.json` for each dataset root.
+That sidecar records per-episode control-frame ratios for left and right arms, which lets later
+sanity checks tell whether dataset actions came from real CAN control frames or from observation
+fallback.
 
-### D. Visualize dataset
+Important unit note:
+
+- on disk, this repo currently stores arm joints in degrees and the gripper in mm
+- when comparing against `mobile-aloha` conventions, project those values as:
+  - arm: `degree -> rad`
+  - gripper: `mm -> normalized [0, 1]` using your verified gripper max stroke (commonly 70 mm or 100 mm)
+
+`lerobot-replay` is still not the right tool for the integrated Songling chain, but this example
+now includes a dedicated replay script:
+
+```bash
+python examples/songling_aloha/replay_episodes.py \
+  --config-path examples/songling_aloha/teleop.yaml \
+  --dataset.root outputs/songling_aloha \
+  --dataset.repo_id your_hf_username/songling_aloha_demo \
+  --dataset.episode 0 \
+  --display_data=true
+```
+
+This default mode is an offline episode replay: it walks the dataset at the original FPS and
+re-logs recorded states, actions and camera frames to Rerun.
+
+For the current integrated Songling CAN chain, use raw-CAN shadow replay instead of live command send:
+
+```bash
+python examples/songling_aloha/replay_episodes.py \
+  --config-path examples/songling_aloha/teleop.yaml \
+  --dataset.root outputs/songling_aloha \
+  --dataset.repo_id your_hf_username/songling_aloha_demo \
+  --dataset.episode 0 \
+  --raw-can-mode \
+  --display_data=true
+```
+
+That mode replays the recorded episode timeline while simultaneously reading live CAN + cameras from
+the current Songling setup, so you can compare:
+
+- recorded dataset action/state
+- live decoded observation
+- live candidate action frames seen on the bus
+
+If you later switch to a non-integrated OpenArm-compatible runtime config, the same script can send
+recorded actions back to the robot:
+
+```bash
+python examples/songling_aloha/replay_episodes.py \
+  --config-path path/to/non_integrated_openarm.yaml \
+  --dataset.root outputs/songling_aloha \
+  --dataset.repo_id your_hf_username/songling_aloha_demo \
+  --dataset.episode 0 \
+  --connect-live
+```
+
+An experimental Piper-V2-like Songling runtime config is now available at:
+
+```bash
+examples/songling_aloha/runtime_songling.yaml
+```
+
+Important:
+
+- it is opt-in only and keeps `allow_unverified_commanding: false` by default
+- to actually send real commands, set `robot.left_arm_config.allow_unverified_commanding=true`
+  and `robot.right_arm_config.allow_unverified_commanding=true` after verifying the protocol on your hardware
+- this new runtime assumes a Piper-like control path:
+  - mode control: `0x151`
+  - joint control: `0x155`, `0x156`, `0x157`
+  - gripper control: `0x159`
+  - feedback: `0x2A1`, `0x2A5`, `0x2A6`, `0x2A7`, `0x2A8`
+- the earlier raw-CAN dataset path in this example used heuristic field extraction and may not match
+  this new runtime's Piper-style units yet, so do not assume an old checkpoint or old dataset can be
+  replayed directly on hardware without checking semantics first
+
+Example ACT deployment with the experimental runtime:
+
+```bash
+python examples/songling_aloha/run_act_inference.py \
+  --config-path examples/songling_aloha/runtime_songling.yaml \
+  --policy.path=outputs/train/act_songling_plate_stack_v1 \
+  --policy.device=cuda \
+  --display_data=true
+```
+
+### C. ACT real-robot inference
+
+For learned policy deployment on the Songling follower pair, use the dedicated
+ACT runtime instead of `lerobot-record`. This path does not create an eval
+dataset and does not require `dataset.single_task`.
+
+The script below reuses the CAN and camera mapping from
+`examples/songling_aloha/teleop.yaml`, while accepting familiar dotted CLI
+overrides such as `--policy.path=...` and `--robot.left_arm_config.port=...`.
+
+Important: the stock `teleop.yaml` in this example models the Songling
+integrated leader+follower chain, where teleop and robot share the same CAN
+port on each side. That hardware layout is not compatible with the generic
+OpenArm/Damiao runtime yet, so real closed-loop ACT deployment still requires
+a dedicated Songling MotorsBus / robot adapter.
+
+You can still run online ACT shadow inference on the integrated chain by
+reading observations from raw CAN plus cameras and visualizing predicted
+actions without sending them back to the robot:
+
+```bash
+python examples/songling_aloha/run_act_inference.py \
+  --config-path examples/songling_aloha/teleop.yaml \
+  --policy.path=outputs/train/act_songling_plate_stack_v1 \
+  --policy.device=cuda \
+  --raw-can-mode \
+  --display_data=true
+```
+
+```bash
+python examples/songling_aloha/run_act_inference.py \
+  --config-path examples/songling_aloha/teleop.yaml \
+  --policy.path=outputs/train/act_songling_plate_stack_v1 \
+  --policy.device=cuda \
+  --display_data=true
+```
+
+If you want to run a specific saved checkpoint instead of the exported model
+directory, point `--policy.path` at that checkpoint's `pretrained_model`
+directory:
+
+```bash
+python examples/songling_aloha/run_act_inference.py \
+  --policy.path=outputs/train/act_songling_plate_stack_v1/checkpoints/040000/pretrained_model \
+  --policy.device=cuda \
+  --display_data=true
+```
+
+Useful optional overrides:
+
+- `--duration=120` to stop automatically after 120 seconds
+- `--display_data=false` to disable Rerun
+- `--robot.left_arm_config.port=can1` and `--robot.right_arm_config.port=can0` to override YAML ports from CLI
+
+### D. Sanity-check a new dataset
+
+Run this immediately after collection, before training or replay:
+
+```bash
+python examples/songling_aloha/check_dataset_sanity.py \
+  --dataset.root outputs/songling_aloha_run_001 \
+  --dataset.repo_id your_hf_username/songling_aloha_demo \
+  --gripper-max-mm 70
+```
+
+This checks:
+
+- the 14-D bimanual schema expected by the current Songling example
+- protocol-native ranges on disk (`degree` for arm joints, `mm` for gripper)
+- a `mobile-aloha`-style projection (`rad` for arm joints, normalized gripper)
+- whether recorded dataset actions mostly came from real control frames or from
+  observation fallback, using `meta/songling_recording_summary.json` when available
+
+If your hardware is using the larger gripper travel variant, rerun with:
+
+```bash
+--gripper-max-mm 100
+```
+
+### E. Visualize dataset
 
 ```bash
 lerobot-dataset-viz \

@@ -280,11 +280,23 @@ python examples/songling_aloha/record_compat.py \
 ```bash
 python examples/songling_aloha/record_compat.py \
   --config_path=examples/songling_aloha/teleop.yaml \
-  --dataset.repo_id=local/songling_aloha_run_001 \
-  --dataset.root=/home/aiteam/wyl/lerobot0.5.0/lerobotPro/outputs/songling_aloha_run_001 \
-  --resume=false \
-  --dataset.auto_increment_root=false \
+  --dataset.repo_id=your_hf_username/songling_aloha_demo \
+  --dataset.root=outputs/songling_aloha_run_001 \
+  --dataset.single_task="Your operation instructions" \
+  --dataset.num_episodes=20 \
+  --dataset.episode_time_s=30 \
+  --dataset.reset_time_s=15 \
   --dataset.push_to_hub=false
+```
+
+说明：
+- 这条命令依然会先走 `record_compat.py`，但在当前 Songling 集成链路配置下会自动转发到 `record_raw_can_dataset.py`。
+- 新录制完成后会自动在 `meta/songling_recording_summary.json` 写入每个 episode 的控制帧占比，供后面的 sanity check 使用。
+- 如果你要严格复用同一个已存在目录而不是自动补 `_001`、`_002` 后缀，再加：
+
+```bash
+--resume=false \
+--dataset.auto_increment_root=false
 ```
 
 ### 5.3 续录同一目录
@@ -292,7 +304,7 @@ python examples/songling_aloha/record_compat.py \
 ```bash
 python examples/songling_aloha/record_compat.py \
   --config_path=examples/songling_aloha/teleop.yaml \
-  --dataset.repo_id=local/songling_aloha_run_001 \
+  --dataset.repo_id=your_hf_username/songling_aloha_demo \
   --dataset.root=/home/aiteam/wyl/lerobot0.5.0/lerobotPro/outputs/songling_aloha_run_001 \
   --resume=true \
   --dataset.auto_increment_root=false
@@ -351,7 +363,26 @@ ls -la outputs/songling_aloha
 ls -la outputs/songling_aloha/meta
 ```
 
-### 6.2 数据集可视化
+### 6.2 新数据 sanity check
+
+推荐先跑一次这个脚本，再去做可视化和训练：
+
+```bash
+python examples/songling_aloha/check_dataset_sanity.py \
+  --dataset.root=/home/aiteam/wyl/lerobot0.5.0/lerobotPro/outputs/songling_aloha_run_001 \
+  --dataset.repo_id=your_hf_username/songling_aloha_demo \
+  --gripper-max-mm=70
+```
+
+它会同时检查：
+- 数据集 schema 是否还是标准 14 维双臂状态/动作
+- 当前落盘单位是否落在 Songling / Piper 协议允许范围内
+- 映射到 mobile-aloha 语义后，关节弧度和夹爪归一化是否合理
+- `meta/songling_recording_summary.json` 中记录的 action 来源是否主要来自控制帧而不是 observation fallback
+
+如果你的夹爪已经确认是大行程版本，把 `--gripper-max-mm=100` 再跑一遍。
+
+### 6.3 数据集可视化
 
 ```bash
 lerobot-dataset-viz \
@@ -364,7 +395,7 @@ lerobot-dataset-viz \
 
 ```bash
 lerobot-dataset-viz \
-  --repo-id local/songling_aloha_run_001 \
+  --repo-id your_hf_username/songling_aloha_demo \
   --root /home/aiteam/wyl/lerobot0.5.0/lerobotPro/outputs/songling_aloha_run_001 \
   --episode-index 0
 ```
