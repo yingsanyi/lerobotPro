@@ -350,8 +350,11 @@ def find_port(
 
 def _replace_songling_side_port_in_text(text: str, side: str, port: str) -> tuple[str, int, int]:
     """
-    Replace `port:` under `teleop.<side>_arm_config` and `robot.<side>_arm_config`
-    while preserving comments/formatting.
+    Replace Songling CAN fields for one side while preserving comments/formatting.
+
+    - teleop.<side>_arm_config.port
+    - robot.<side>_arm_config.channel (preferred)
+    - robot.<side>_arm_config.port (legacy fallback)
     """
     if side not in {"left", "right"}:
         raise ValueError(f"Invalid side={side!r}. Expected 'left' or 'right'.")
@@ -383,10 +386,15 @@ def _replace_songling_side_port_in_text(text: str, side: str, port: str) -> tupl
         if in_top and indent == 2 and stripped.endswith(":") and stripped != target_arm_key:
             in_arm = False
 
-        if in_top and in_arm and indent == 4 and stripped.startswith("port:"):
+        if in_top and in_arm and indent == 4 and (
+            stripped.startswith("port:") or (in_top == "robot" and stripped.startswith("channel:"))
+        ):
             prefix = line[: len(line) - len(line.lstrip(" "))]
             nl = "\n" if line.endswith("\n") else ""
-            lines[i] = f"{prefix}port: {port}{nl}"
+            key = "port"
+            if in_top == "robot" and stripped.startswith("channel:"):
+                key = "channel"
+            lines[i] = f"{prefix}{key}: {port}{nl}"
             if in_top == "teleop":
                 teleop_hits += 1
             else:
@@ -412,7 +420,7 @@ def update_songling_config_ports(config_path: Path, side: str, port: str) -> Non
     config_path.write_text(updated, encoding="utf-8")
     print(
         f"Updated Songling config: side={side}, port={port}, "
-        f"targets=teleop.{side}_arm_config.port + robot.{side}_arm_config.port"
+        f"targets=teleop.{side}_arm_config.port + robot.{side}_arm_config.channel/port"
     )
 
 

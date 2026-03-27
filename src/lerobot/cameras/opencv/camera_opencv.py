@@ -119,6 +119,8 @@ class OpenCVCamera(Camera):
 
         self.rotation: int | None = get_cv2_rotation(config.rotation)
         self.backend: int = config.backend
+        self.active_index_or_path: int | str | Path = self.index_or_path
+        self.active_backend: int = self.backend
 
         if self.height and self.width:
             self.capture_width, self.capture_height = self.width, self.height
@@ -127,6 +129,64 @@ class OpenCVCamera(Camera):
 
     def __str__(self) -> str:
         return f"{self.__class__.__name__}({self.index_or_path})"
+
+    def _device_index_from_path(self, value: str | Path) -> int | None:
+        path = Path(value)
+        name = path.name
+        if name.startswith("video") and name[5:].isdigit():
+            return int(name[5:])
+        return None
+
+    def _capture_attempts(self) -> list[tuple[int | str | Path, int]]:
+        attempts: list[tuple[int | str | Path, int]] = []
+        seen: set[tuple[str, int]] = set()
+
+        def add(target: int | str | Path, backend: int) -> None:
+            key = (str(target), int(backend))
+            if key in seen:
+                return
+            seen.add(key)
+            attempts.append((target, backend))
+
+        add(self.index_or_path, self.backend)
+
+        if isinstance(self.index_or_path, (str, Path)):
+            original = Path(self.index_or_path)
+            resolved = original.expanduser().resolve(strict=False)
+            if str(resolved) != str(original):
+                add(str(resolved), self.backend)
+            resolved_index = self._device_index_from_path(resolved)
+            if resolved_index is not None:
+                add(resolved_index, self.backend)
+            if self.backend != cv2.CAP_ANY:
+                add(str(resolved), cv2.CAP_ANY)
+                if resolved_index is not None:
+                    add(resolved_index, cv2.CAP_ANY)
+        elif isinstance(self.index_or_path, int) and self.backend != cv2.CAP_ANY:
+            add(self.index_or_path, cv2.CAP_ANY)
+
+        return attempts
+
+    def _open_videocapture(self) -> cv2.VideoCapture | None:
+        last_capture: cv2.VideoCapture | None = None
+        for target, backend in self._capture_attempts():
+            capture = cv2.VideoCapture(target, backend)
+            if capture.isOpened():
+                self.active_index_or_path = target
+                self.active_backend = backend
+                if target != self.index_or_path or backend != self.backend:
+                    logger.warning(
+                        "%s opened camera via fallback target=%s backend=%s (configured target=%s backend=%s)",
+                        self,
+                        target,
+                        backend,
+                        self.index_or_path,
+                        self.backend,
+                    )
+                return capture
+            capture.release()
+            last_capture = capture
+        return last_capture
 
     @property
     def is_connected(self) -> bool:
@@ -155,10 +215,11 @@ class OpenCVCamera(Camera):
         # blocking in multi-threaded applications, especially during data collection.
         cv2.setNumThreads(1)
 
-        self.videocapture = cv2.VideoCapture(self.index_or_path, self.backend)
+        self.videocapture = self._open_videocapture()
 
-        if not self.videocapture.isOpened():
-            self.videocapture.release()
+        if self.videocapture is None or not self.videocapture.isOpened():
+            if self.videocapture is not None:
+                self.videocapture.release()
             self.videocapture = None
             raise ConnectionError(
                 f"Failed to open {self}.Run `lerobot-find-cameras opencv` to find available cameras."
@@ -474,8 +535,8 @@ class OpenCVCamera(Camera):
                             self.videocapture.release()
                             self.videocapture = None
 
-                        self.videocapture = cv2.VideoCapture(self.index_or_path, self.backend)
-                        if self.videocapture.isOpened():
+                        self.videocapture = self._open_videocapture()
+                        if self.videocapture is not None and self.videocapture.isOpened():
                             try:
                                 self._configure_capture_settings()
                             except Exception as cfg_exc:

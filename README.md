@@ -34,7 +34,8 @@ examples/songling_aloha/
   record_raw_can_dataset.py    # 原始 CAN 采集实现
   visualize_teleop_live.py     # 实时可视化（Rerun）
   capture_three_cameras.py     # 三相机拍照验证
-  sniff_can_frames.py          # CAN 抓包
+  replay_episodes.py           # 数据重播
+  manual_joint_control.py      # 上位机手动控制
 ```
 
 ---
@@ -193,17 +194,17 @@ lerobot-find-cameras opencv \
   --songling-right-elbow-index 1
 ```
 
-### 3.4 可选：原始 CAN 抓包
+### 3.4 当前目录整理说明
 
-当你要做协议分析或二次适配时，先抓包：
+`examples/songling_aloha/` 已整理为主工作流目录，只保留：
 
-```bash
-python examples/songling_aloha/sniff_can_frames.py \
-  --interfaces can0 can1 \
-  --duration-s 20 \
-  --bitrate 1000000 \
-  --output-dir /tmp/songling_can_sniff
-```
+- 上位机控制
+- 示教
+- 数据采集
+- 数据检查
+- 重播
+
+原先用于抓包、诊断、恢复、参数修复的一次性脚本已移除，避免目录继续膨胀。
 
 ---
 

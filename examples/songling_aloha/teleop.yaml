@@ -1,94 +1,210 @@
-# Single source of truth for Songling CAN + camera mapping.
-teleop:
-  type: bi_openarm_leader
-  id: songling_aloha_leader
-  left_arm_config:
-    # User-defined mapping:
-    # set this to the CAN interface that corresponds to your LEFT integrated chain.
-    port: can1
-    use_can_fd: false
-    can_bitrate: 1000000
-    can_data_bitrate: 5000000
-    manual_control: false
-  right_arm_config:
-    # User-defined mapping:
-    # set this to the CAN interface that corresponds to your RIGHT integrated chain.
-    port: can0
-    use_can_fd: false
-    can_bitrate: 1000000
-    can_data_bitrate: 5000000
-    manual_control: false
-
 robot:
-  type: bi_openarm_follower
-  id: songling_aloha_follower
+  type: bi_songling_follower
+  id: songling_aloha_runtime
+  calibration_dir: outputs/songling_aloha_calibration
   left_arm_config:
-    # Keep this aligned with teleop.left_arm_config.port.
-    port: can1
+    # One CAN port per side.
+    # `can0` is the shared bus for the whole left master/slave pair, not a single arm.
+    channel: can0
     side: left
+    transport_backend: piper_sdk
+    interface: socketcan
     use_can_fd: false
-    can_bitrate: 1000000
+    bitrate: 1000000
     can_data_bitrate: 5000000
+    piper_judge_flag: false
+    disable_torque_on_disconnect: false
     max_relative_target: 5.0
     cameras:
       high:
         type: opencv
-        # Use stable device symlinks instead of numeric indices to avoid drift across reboots.
-        index_or_path: /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._Dabai_DC1_CC1S74101GJ-video-index0
+        fps: 30
         width: 640
         height: 480
-        fps: 30
+        index_or_path: /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._Dabai_DC1_CC1S74101GJ-video-index0
+        color_mode: rgb
+        rotation: 0
+        warmup_s: 1
         fourcc: MJPG
-        backend: 200  # V4L2
+        backend: 200
       elbow:
         type: opencv
-        index_or_path: /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._USB_2.0_Camera_AU1GC32017T-video-index0
+        fps: 30
         width: 640
         height: 480
-        fps: 30
+        index_or_path: /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._USB_2.0_Camera_AU1GC32017T-video-index0
+        color_mode: rgb
+        rotation: 0
+        warmup_s: 1
         fourcc: MJPG
-        backend: 200  # V4L2
+        backend: 200
+    joint_limits:
+      joint_1:
+      - -150.0
+      - 150.0
+      joint_2:
+      - -4.163
+      - 180.0
+      joint_3:
+      - -170.0
+      - 2.177
+      joint_4:
+      - -100.0
+      - 100.0
+      joint_5:
+      - -70.0
+      - 70.0
+      joint_6:
+      - -120.0
+      - 120.0
+      gripper:
+      - -1.4
+      - 100.0
+    joint_zero_offsets:
+      joint_1: 0.0
+      joint_2: 0.0
+      joint_3: 0.0
+      joint_4: 0.0
+      joint_5: 0.0
+      joint_6: 0.0
+      gripper: 0.0
+    pre_disable_pose:
+      joint_1: 0.0
+      joint_2: -2.1630000000000003
+      joint_3: -0.34700000000000003
+      joint_4: 0.373
+      joint_5: 31.82
+      joint_6: 0.0
+      gripper: -0.2
+    allow_unverified_commanding: false
+    auto_enable_on_connect: true
+    auto_configure_mode_on_connect: true
+    speed_percent: 20
+    motion_mode: j
+    ctrl_mode: 1
+    move_mode: 1
+    mit_mode: 0
+    residence_time: 0
+    installation_pos: null
+    command_repeat: 1
+    command_interval_s: 0.0
+    mode_keepalive_s: 0.5
+    poll_max_msgs: 256
+    joint_scale: 0.001
+    gripper_scale: 0.001
+    gripper_force: 1.0
+    gripper_status_code: 1
+    gripper_set_zero: 0
+    enable_retry_count: 50
+    enable_retry_interval_s: 0.02
+    auto_configure_master_slave_on_connect: false
+    leader_follower_role: null
+    leader_follower_feedback_offset: 0
+    leader_follower_ctrl_offset: 0
+    leader_follower_linkage_offset: 0
   right_arm_config:
-    # Keep this aligned with teleop.right_arm_config.port.
-    port: can0
+    # `can1` is the shared bus for the whole right master/slave pair.
+    channel: can1
     side: right
+    transport_backend: piper_sdk
+    interface: socketcan
     use_can_fd: false
-    can_bitrate: 1000000
+    bitrate: 1000000
     can_data_bitrate: 5000000
+    piper_judge_flag: false
+    disable_torque_on_disconnect: false
     max_relative_target: 5.0
     cameras:
       elbow:
         type: opencv
-        index_or_path: /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._Dabai_DC1_CC1S74101GY-video-index0
+        fps: 30
         width: 640
         height: 480
-        fps: 30
+        index_or_path: /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._Dabai_DC1_CC1S74101GY-video-index0
+        color_mode: rgb
+        rotation: 0
+        warmup_s: 1
         fourcc: MJPG
-        backend: 200  # V4L2
-
+        backend: 200
+    joint_limits:
+      joint_1:
+      - -150.0
+      - 150.0
+      joint_2:
+      - -4.043
+      - 180.0
+      joint_3:
+      - -170.0
+      - 2.756
+      joint_4:
+      - -100.0
+      - 100.0
+      joint_5:
+      - -70.0
+      - 70.0
+      joint_6:
+      - -120.0
+      - 120.0
+      gripper:
+      - -1.0
+      - 100.0
+    joint_zero_offsets:
+      joint_1: 0.0
+      joint_2: 0.0
+      joint_3: 0.0
+      joint_4: 0.0
+      joint_5: 0.0
+      joint_6: 0.0
+      gripper: 0.0
+    pre_disable_pose:
+      joint_1: -0.5730000000000001
+      joint_2: 0.0
+      joint_3: -0.115
+      joint_4: -0.115
+      joint_5: 31.856
+      joint_6: -0.057
+      gripper: 0.0
+    allow_unverified_commanding: false
+    auto_enable_on_connect: true
+    auto_configure_mode_on_connect: true
+    speed_percent: 20
+    motion_mode: j
+    ctrl_mode: 1
+    move_mode: 1
+    mit_mode: 0
+    residence_time: 0
+    installation_pos: null
+    command_repeat: 1
+    command_interval_s: 0.0
+    mode_keepalive_s: 0.5
+    poll_max_msgs: 256
+    joint_scale: 0.001
+    gripper_scale: 0.001
+    gripper_force: 1.0
+    gripper_status_code: 1
+    gripper_set_zero: 0
+    enable_retry_count: 50
+    enable_retry_interval_s: 0.02
+    auto_configure_master_slave_on_connect: false
+    leader_follower_role: null
+    leader_follower_feedback_offset: 0
+    leader_follower_ctrl_offset: 0
+    leader_follower_linkage_offset: 0
+# Safety default:
+# Songling integrated chains already contain hardware leader/follower teleoperation.
+# Keep software teleop disabled so generic OpenArm entry points
+# cannot accidentally touch the leader/master arm.
+teleop: null
 fps: 30
 display_data: true
 display_compressed_images: false
-
-# Default recording parameters for lerobot-record compatible collection.
-dataset:
-  repo_id: your_hf_username/songling_aloha_demo
-  single_task: Bimanual teleoperation with Songling ALOHA profile
-  root: outputs/songling_aloha
-  fps: 30
-  episode_time_s: 30
-  reset_time_s: 15
-  num_episodes: 1
-  video: true
-  push_to_hub: false
-  streaming_encoding: true
-  encoder_threads: 2
-
 play_sounds: true
 voice_lang: zh
+voice_rate: null
 voice_engine: piper
-# Optional: defaults for Piper offline neural TTS so CLI can stay short.
-voice_piper_binary: third_party/piper/piper/piper
 voice_piper_model: third_party/piper/models/zh_CN-huayan-medium.onnx
-# voice_piper_speaker: null
+voice_piper_binary: third_party/piper/piper/piper
+voice_piper_speaker: null
+display_ip: null
+display_port: null
 resume: false

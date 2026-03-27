@@ -142,6 +142,7 @@ from lerobot.utils.control_utils import (
 )
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.robot_utils import precise_sleep
+from lerobot.utils.songling_safety import raise_if_songling_integrated_openarm_risk
 from lerobot.utils.utils import (
     get_safe_torch_device,
     init_logging,
@@ -483,6 +484,11 @@ def record_loop(
 def record(cfg: RecordConfig) -> LeRobotDataset:
     init_logging()
     logging.info(pformat(asdict(cfg)))
+    raise_if_songling_integrated_openarm_risk(
+        robot_cfg=cfg.robot,
+        teleop_cfg=cfg.teleop,
+        entrypoint="lerobot-record",
+    )
     if cfg.display_data:
         init_rerun(session_name="recording", ip=cfg.display_ip, port=cfg.display_port)
     display_compressed_images = (

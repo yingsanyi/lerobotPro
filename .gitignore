@@ -170,7 +170,8 @@ lerobot_piper/
 mobile-aloha/
 act-plus-plus-main/
 act-plus-plus202-master/
-piper_sdk/
+piper_sdk /
+pyAgxArm /
 
 # Translations
 *.mo

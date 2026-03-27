@@ -65,6 +65,7 @@ from lerobot.teleoperators import (  # noqa: F401
     so_leader,
 )
 from lerobot.utils.robot_utils import precise_sleep
+from lerobot.utils.songling_safety import raise_if_songling_integrated_openarm_risk
 
 
 @dataclass
@@ -88,6 +89,11 @@ class FindJointLimitsConfig:
 
 @draccus.wrap()
 def find_joint_and_ee_bounds(cfg: FindJointLimitsConfig):
+    raise_if_songling_integrated_openarm_risk(
+        robot_cfg=cfg.robot,
+        teleop_cfg=cfg.teleop,
+        entrypoint="lerobot-find-joint-limits",
+    )
     teleop = make_teleoperator_from_config(cfg.teleop)
     robot = make_robot_from_config(cfg.robot)
 

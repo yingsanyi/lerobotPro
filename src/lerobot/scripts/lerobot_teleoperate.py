@@ -102,6 +102,7 @@ from lerobot.teleoperators import (  # noqa: F401
 )
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.robot_utils import precise_sleep
+from lerobot.utils.songling_safety import raise_if_songling_integrated_openarm_risk
 from lerobot.utils.utils import init_logging, move_cursor_up
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
@@ -209,6 +210,11 @@ def teleop_loop(
 def teleoperate(cfg: TeleoperateConfig):
     init_logging()
     logging.info(pformat(asdict(cfg)))
+    raise_if_songling_integrated_openarm_risk(
+        robot_cfg=cfg.robot,
+        teleop_cfg=cfg.teleop,
+        entrypoint="lerobot-teleoperate",
+    )
     if cfg.display_data:
         init_rerun(session_name="teleoperation", ip=cfg.display_ip, port=cfg.display_port)
     display_compressed_images = (

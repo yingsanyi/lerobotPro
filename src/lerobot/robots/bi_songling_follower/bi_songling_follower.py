@@ -115,6 +115,15 @@ class BiSonglingFollower(Robot):
         return obs
 
     @check_if_not_connected
+    def get_commanded_action(self, poll: bool = True) -> RobotAction:
+        left_action = self.left_arm.get_commanded_action(poll=poll)
+        right_action = self.right_arm.get_commanded_action(poll=poll)
+        return {
+            **{f"left_{key}": value for key, value in left_action.items()},
+            **{f"right_{key}": value for key, value in right_action.items()},
+        }
+
+    @check_if_not_connected
     def send_action(self, action: RobotAction) -> RobotAction:
         left_action = {
             key.removeprefix("left_"): value for key, value in action.items() if key.startswith("left_")

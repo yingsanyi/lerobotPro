@@ -23,7 +23,7 @@ Songling real-control bridge:
 - joint/gripper control frame encoding
 - control-mode and motor enable/disable frame encoding
 
-The mapping is based on the local `piper_sdk` reference bundled in this repo.
+The mapping is based on the AgileX Piper CAN protocol as exposed by piper_sdk.
 """
 
 from __future__ import annotations
@@ -70,6 +70,7 @@ ARM_JOINT_CTRL_12 = 0x155
 ARM_JOINT_CTRL_34 = 0x156
 ARM_JOINT_CTRL_56 = 0x157
 ARM_GRIPPER_CTRL = 0x159
+ARM_MASTER_SLAVE_MODE_CONFIG = 0x470
 ARM_MOTOR_ENABLE_DISABLE_CONFIG = 0x471
 
 JOINT_FEEDBACK_IDS = {
@@ -147,6 +148,14 @@ class SonglingGripperFeedback:
     status_code: int
 
 
+@dataclass(frozen=True)
+class SonglingGripperCommand:
+    position: int
+    effort: int
+    status_code: int
+    set_zero: int
+
+
 def decode_status_feedback(payload: bytes) -> SonglingStatusFeedback:
     if len(payload) < 8:
         raise ValueError(f"Expected 8-byte status payload, got {len(payload)}.")
@@ -180,6 +189,29 @@ def decode_gripper_feedback(payload: bytes) -> SonglingGripperFeedback:
         position=_int_from_be(payload, 0, 4, signed=True),
         effort=_int_from_be(payload, 4, 6, signed=True),
         status_code=payload[6],
+    )
+
+
+def decode_joint_command(arbitration_id: int, payload: bytes) -> dict[str, int]:
+    joint_names = JOINT_COMMAND_IDS.get(arbitration_id)
+    if joint_names is None:
+        raise ValueError(f"Unsupported joint command ID: 0x{arbitration_id:X}")
+    if len(payload) < 8:
+        raise ValueError(f"Expected 8-byte joint command payload, got {len(payload)}.")
+    return {
+        joint_names[0]: _int_from_be(payload, 0, 4, signed=True),
+        joint_names[1]: _int_from_be(payload, 4, 8, signed=True),
+    }
+
+
+def decode_gripper_command(payload: bytes) -> SonglingGripperCommand:
+    if len(payload) < 8:
+        raise ValueError(f"Expected 8-byte gripper command payload, got {len(payload)}.")
+    return SonglingGripperCommand(
+        position=_int_from_be(payload, 0, 4, signed=True),
+        effort=_int_from_be(payload, 4, 6, signed=False),
+        status_code=payload[6],
+        set_zero=payload[7],
     )
 
 
@@ -244,6 +276,27 @@ def encode_motor_enable_disable(*, motor_num: int = 0xFF, enable_flag: int = 0x0
     return bytes([motor_num & 0xFF, enable_flag & 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
 
 
+def encode_master_slave_config(
+    *,
+    linkage_config: int = 0x00,
+    feedback_offset: int = 0x00,
+    ctrl_offset: int = 0x00,
+    linkage_offset: int = 0x00,
+) -> bytes:
+    return bytes(
+        [
+            linkage_config & 0xFF,
+            feedback_offset & 0xFF,
+            ctrl_offset & 0xFF,
+            linkage_offset & 0xFF,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+        ]
+    )
+
+
 def encode_joint_command_pair(arbitration_id: int, first_value: int, second_value: int) -> bytes:
     if arbitration_id not in JOINT_COMMAND_IDS:
         raise ValueError(f"Unsupported joint command ID: 0x{arbitration_id:X}")
@@ -271,3 +324,13 @@ def installation_pos_for_side(side: str | None) -> int:
         return 0x03
     return 0x00
 
+
+def linkage_config_for_role(role: str | None) -> int:
+    normalized = (role or "").strip().lower()
+    if normalized in {"leader", "master", "teach"}:
+        return 0xFA
+    if normalized in {"follower", "slave"}:
+        return 0xFC
+    if normalized in {"", "none", "default", "standalone", "independent"}:
+        return 0x00
+    raise ValueError(f"Unsupported Songling leader/follower role: {role!r}")
