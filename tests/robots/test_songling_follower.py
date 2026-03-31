@@ -10,6 +10,7 @@ from lerobot.robots.songling_follower import SonglingFollowerConfig
 from lerobot.robots.songling_follower import transport as songling_transport
 from lerobot.robots.songling_follower.protocol import (
     ARM_JOINT_CTRL_12,
+    DEFAULT_SONGLING_JOINT_NAMES,
     decode_gripper_feedback,
     decode_gripper_command,
     decode_joint_feedback,
@@ -290,6 +291,60 @@ def test_songling_port_sanitizes_runtime_installation_pos(monkeypatch, tmp_path)
     port = songling_transport.PiperSDKPort(cfg)
 
     assert port.installation_pos() == 0x00
+
+
+def test_songling_port_keeps_installation_pos_blocked_even_when_runtime_reports_side(monkeypatch, tmp_path):
+    monkeypatch.setattr(songling_transport, "C_PiperInterface_V2", lambda *args, **kwargs: _DummyPiperInterface())
+    cfg = SonglingFollowerConfig(
+        channel="can1",
+        side="left",
+        transport_backend="piper_sdk",
+        installation_pos=None,
+        calibration_dir=tmp_path / "calibration",
+        allow_unverified_commanding=False,
+    )
+
+    port = songling_transport.PiperSDKPort(cfg)
+    port.mode_command_valid = True
+    port.mode_command = {"installation_pos": 0x02}
+
+    assert port.installation_pos() == 0x00
+
+
+def test_wait_for_driver_enable_status_throttles_reenable(monkeypatch, tmp_path):
+    monkeypatch.setattr(songling_transport, "C_PiperInterface_V2", lambda *args, **kwargs: _DummyPiperInterface())
+    cfg = SonglingFollowerConfig(
+        channel="can1",
+        side="left",
+        transport_backend="piper_sdk",
+        calibration_dir=tmp_path / "calibration",
+        allow_unverified_commanding=False,
+        enable_retry_count=11,
+        enable_retry_interval_s=0.0,
+    )
+
+    port = songling_transport.PiperSDKPort(cfg)
+    enable_calls: list[bool] = []
+    poll_count = {"value": 0}
+
+    def fake_enable_motors(*, enable: bool) -> None:
+        enable_calls.append(bool(enable))
+
+    def fake_poll(*, max_msgs=None) -> None:
+        _ = max_msgs
+        poll_count["value"] += 1
+
+    def fake_status() -> dict[str, bool | None]:
+        if poll_count["value"] >= 11:
+            return {joint_name: True for joint_name in DEFAULT_SONGLING_JOINT_NAMES[:-1]}
+        return {joint_name: None for joint_name in DEFAULT_SONGLING_JOINT_NAMES[:-1]}
+
+    monkeypatch.setattr(port, "enable_motors", fake_enable_motors)
+    monkeypatch.setattr(port, "poll", fake_poll)
+    monkeypatch.setattr(port, "get_driver_enable_status", fake_status)
+
+    assert port.wait_for_driver_enable_status(enabled=True) is True
+    assert enable_calls == [True, True, True]
 
 
 def test_songling_robot_rejects_unknown_backend(tmp_path):

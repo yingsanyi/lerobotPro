@@ -81,6 +81,7 @@ from .protocol import (
 )
 
 logger = logging.getLogger(__name__)
+ENABLE_STATUS_RESEND_EVERY = 5
 
 
 def _joint_rad_to_raw(value_rad: float) -> int:
@@ -281,13 +282,18 @@ class SonglingPortBase:
         retry_count = max(int(self.config.enable_retry_count), 1)
         retry_interval_s = max(float(self.config.enable_retry_interval_s), 0.0)
 
-        for _ in range(retry_count):
-            self.enable_motors(enable=enabled)
+        self.enable_motors(enable=enabled)
+        for attempt in range(retry_count):
             self.poll(max_msgs=self.config.poll_max_msgs)
             statuses = self.get_driver_enable_status()
             known = [state for state in statuses.values() if state is not None]
             if known and all(bool(state) is expected for state in known):
                 return True
+            if (
+                attempt + 1 < retry_count
+                and (attempt + 1) % ENABLE_STATUS_RESEND_EVERY == 0
+            ):
+                self.enable_motors(enable=enabled)
             if retry_interval_s > 0:
                 time.sleep(retry_interval_s)
         return False

@@ -382,7 +382,7 @@ def _to_yaml_safe_value(value: Any) -> Any:
 def _make_arm_config(
     *,
     app_id: str,
-    calibration_dir: Path,
+    calibration_dir: Path | None,
     raw_arm_cfg: SonglingFollowerConfigBase,
 ) -> SonglingFollowerConfig:
     values = dict(raw_arm_cfg.__dict__)
@@ -403,7 +403,7 @@ def _make_arm_config(
 def _make_probe_port_config(
     *,
     app_id: str,
-    calibration_dir: Path,
+    calibration_dir: Path | None,
     raw_arm_cfg: SonglingFollowerConfigBase,
     channel: str,
 ) -> SonglingFollowerConfig:
@@ -430,7 +430,8 @@ def _build_arm_handles(cfg: ManualControlConfig) -> list[ArmHandle]:
     if left_arm_cfg is None or right_arm_cfg is None:
         raise ValueError("This tool expects a bimanual Songling follower config with left/right arm sections.")
 
-    calibration_dir = Path(getattr(robot_cfg, "calibration_dir", Path("outputs/songling_aloha_calibration")))
+    calibration_dir_value = getattr(robot_cfg, "calibration_dir", None)
+    calibration_dir = Path(calibration_dir_value) if calibration_dir_value is not None else None
     left = SonglingFollower(
         _make_arm_config(app_id=f"{robot_cfg.id}_left", calibration_dir=calibration_dir, raw_arm_cfg=left_arm_cfg)
     )
@@ -1408,7 +1409,8 @@ class ManualJointControlWindow(QMainWindow):
         if raw_arm_cfg is None:
             raise ValueError(f"Config is missing robot.{side}_arm_config.")
 
-        calibration_dir = Path(getattr(robot_cfg, "calibration_dir", Path("outputs/songling_aloha_calibration")))
+        calibration_dir_value = getattr(robot_cfg, "calibration_dir", None)
+        calibration_dir = Path(calibration_dir_value) if calibration_dir_value is not None else None
         probe_cfg = _make_probe_port_config(
             app_id=f"{robot_cfg.id}_{side}_probe_{channel}",
             calibration_dir=calibration_dir,

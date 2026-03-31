@@ -45,6 +45,37 @@ python examples/songling_aloha/visualize_teleop_live.py \
   --config-path examples/songling_aloha/teleop.yaml
 ```
 
+### 3.5 Optimize USB Camera Stability (Recommended)
+
+When cameras are connected through cascaded USB hubs, Linux autosuspend can cause
+intermittent disconnect/re-enumeration under load.
+
+Inspect current camera/hub USB power state:
+
+```bash
+python examples/songling_aloha/optimize_usb_camera_stability.py \
+  --config-path examples/songling_aloha/teleop.yaml
+```
+
+Apply runtime optimization (effective until reboot):
+
+```bash
+sudo python examples/songling_aloha/optimize_usb_camera_stability.py \
+  --config-path examples/songling_aloha/teleop.yaml \
+  --apply-runtime
+```
+
+Generate persistent udev rules:
+
+```bash
+python examples/songling_aloha/optimize_usb_camera_stability.py \
+  --config-path examples/songling_aloha/teleop.yaml \
+  --write-udev-rules /tmp/99-songling-usb-camera-stability.rules
+sudo cp /tmp/99-songling-usb-camera-stability.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
 ### 4. Manual Upper-Computer Control
 
 ```bash

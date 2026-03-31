@@ -1,7 +1,6 @@
 robot:
   type: bi_songling_follower
   id: songling_aloha_runtime
-  calibration_dir: outputs/songling_aloha_calibration
   left_arm_config:
     # One CAN port per side.
     # `can0` is the shared bus for the whole left master/slave pair, not a single arm.

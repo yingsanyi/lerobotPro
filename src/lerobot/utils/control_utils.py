@@ -18,6 +18,7 @@
 
 
 import logging
+import time
 import traceback
 from contextlib import nullcontext
 from copy import copy
@@ -135,6 +136,10 @@ def init_keyboard_listener():
     events["exit_early"] = False
     events["rerecord_episode"] = False
     events["stop_recording"] = False
+    events["quick_save_request_count"] = 0
+    events["rerecord_request_count"] = 0
+    events["stop_request_count"] = 0
+    events["_last_request_ts"] = {}
 
     if is_headless():
         logging.warning(
@@ -146,17 +151,37 @@ def init_keyboard_listener():
     # Only import pynput if not in a headless environment
     from pynput import keyboard
 
+    request_debounce_s = 0.25
+
+    def _request_once(action: str) -> bool:
+        now = time.monotonic()
+        last_ts = float(events["_last_request_ts"].get(action, 0.0) or 0.0)
+        if (now - last_ts) < request_debounce_s:
+            return False
+        events["_last_request_ts"][action] = now
+        return True
+
     def on_press(key):
         try:
-            if key == keyboard.Key.right:
-                print("Right arrow key pressed. Exiting loop...")
+            key_char = getattr(key, "char", None)
+            if key == keyboard.Key.right or key_char in {"d", "D"}:
+                if not _request_once("quick_save"):
+                    return
+                print("Quick save requested (Right Arrow / D).")
+                events["quick_save_request_count"] += 1
                 events["exit_early"] = True
-            elif key == keyboard.Key.left:
-                print("Left arrow key pressed. Exiting loop and rerecord the last episode...")
+            elif key == keyboard.Key.left or key_char in {"a", "A"}:
+                if not _request_once("rerecord"):
+                    return
+                print("Re-record requested (Left Arrow / A).")
+                events["rerecord_request_count"] += 1
                 events["rerecord_episode"] = True
                 events["exit_early"] = True
-            elif key == keyboard.Key.esc:
-                print("Escape key pressed. Stopping data recording...")
+            elif key == keyboard.Key.esc or key_char in {"q", "Q"}:
+                if not _request_once("stop"):
+                    return
+                print("Stop recording requested (Esc / Q).")
+                events["stop_request_count"] += 1
                 events["stop_recording"] = True
                 events["exit_early"] = True
         except Exception as e:
