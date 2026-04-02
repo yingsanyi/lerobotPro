@@ -65,10 +65,12 @@ DEFAULT_JOINT_NAMES = ("joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "j
 OBSERVATION_FRAME_IDS = [ARM_JOINT_FEEDBACK_12, ARM_JOINT_FEEDBACK_34, ARM_JOINT_FEEDBACK_56, ARM_GRIPPER_FEEDBACK]
 ACTION_FRAME_IDS = [ARM_JOINT_CTRL_12, ARM_JOINT_CTRL_34, ARM_JOINT_CTRL_56, ARM_GRIPPER_CTRL]
 DEFAULT_COMMAND_FRESHNESS_S = 0.35
+DEFAULT_STALE_GRACE_S = 0.0
 MISSING_LABEL_POLICY_CHOICES = ("drop", "buffer-observation")
 DEFAULT_MISSING_LABEL_POLICY = "buffer-observation"
 DEFAULT_BUFFERED_OBSERVATION_MAX_FRAMES = 90
 DEFAULT_START_ON_FIRST_ACTION = True
+DEFAULT_EPISODE_START_MIN_FRESH_FRAMES = 1
 DEFAULT_EPISODE_END_TAIL_S = 0.5
 CAMERA_CONNECT_RETRIES = 3
 CAMERA_CONNECT_RETRY_WARMUP_S = 3.0
@@ -258,6 +260,122 @@ def _coerce_voice_engine(value: Any) -> str:
             f"Unsupported voice engine: {value}. Use one of: {', '.join(VOICE_ENGINE_CHOICES)}."
         )
     return engine
+
+
+def _show_error_popup(title: str, message: str) -> bool:
+    """Best-effort GUI popup for fatal preflight errors.
+
+    Returns True if a popup was shown; False if GUI is unavailable.
+    """
+
+    has_display = bool(os.getenv("DISPLAY") or os.getenv("WAYLAND_DISPLAY"))
+    if not has_display and platform.system().lower() not in {"windows", "darwin"}:
+        return False
+
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+        except Exception:
+            pass
+        messagebox.showerror(title, message, parent=root)
+        root.destroy()
+        return True
+    except Exception:
+        return False
+
+
+def _query_interface_up_status(interface_name: str) -> tuple[bool | None, str]:
+    """Return (is_up, detail). is_up=None means unknown (unable to determine)."""
+
+    if not interface_name:
+        return False, "empty interface name"
+
+    sysfs_path = Path("/sys/class/net") / interface_name
+    if not sysfs_path.exists():
+        return False, f"interface '{interface_name}' does not exist"
+
+    try:
+        result = subprocess.run(
+            ["ip", "-details", "link", "show", "dev", interface_name],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        result = None
+
+    if result is not None and result.returncode == 0 and result.stdout:
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        first_line = lines[0] if lines else ""
+
+        flags = ""
+        if "<" in first_line and ">" in first_line:
+            flags = first_line.split("<", 1)[1].split(">", 1)[0]
+        flag_set = {item.strip().upper() for item in flags.split(",") if item.strip()}
+        has_up_flag = "UP" in flag_set
+
+        can_state = None
+        for line in lines:
+            if line.startswith("can state "):
+                can_state = line.split("can state ", 1)[1].split()[0].strip()
+                break
+
+        if not has_up_flag:
+            return False, f"flags={flags or 'n/a'}"
+        if can_state is not None and can_state.upper() in {"STOPPED", "BUS-OFF"}:
+            return False, f"flags={flags or 'n/a'}, can_state={can_state}"
+        return True, f"flags={flags or 'n/a'}, can_state={can_state or 'n/a'}"
+
+    # Fallback: sysfs operstate (for CAN this may be 'unknown' when interface is UP).
+    try:
+        operstate = (sysfs_path / "operstate").read_text(encoding="utf-8").strip().lower()
+    except Exception:
+        operstate = "unknown"
+
+    if operstate in {"up", "unknown"}:
+        return True, f"operstate={operstate}"
+    if operstate in {"down", "dormant", "notpresent", "lowerlayerdown"}:
+        return False, f"operstate={operstate}"
+    return None, f"operstate={operstate}"
+
+
+def _ensure_required_can_interfaces_up(interface_names: list[str]) -> None:
+    checked: list[tuple[str, bool | None, str]] = []
+    failed: list[tuple[str, str]] = []
+
+    for ifname in interface_names:
+        is_up, detail = _query_interface_up_status(ifname)
+        checked.append((ifname, is_up, detail))
+        if is_up is not True:
+            failed.append((ifname, detail))
+
+    if not failed:
+        return
+
+    detail_lines = [f"- {name}: {reason}" for name, reason in failed]
+    message = (
+        "检测到必需 CAN 口未处于 UP 状态，已停止采集。\n\n"
+        "请先重新拉起 CAN 接口后再重试，例如：\n"
+        "sudo ip link set can0 up type can bitrate 1000000\n"
+        "sudo ip link set can1 up type can bitrate 1000000\n\n"
+        "检查结果：\n"
+        + "\n".join(detail_lines)
+    )
+
+    print("[ERROR] CAN interface preflight failed:")
+    for ifname, is_up, detail in checked:
+        print(f"[ERROR]   {ifname}: up={is_up} ({detail})")
+
+    popup_shown = _show_error_popup("Songling 采集前检查失败", message)
+    if not popup_shown:
+        print(message)
+
+    raise RuntimeError("CAN interfaces are not UP. Aborting recording.")
 
 
 def _warn_voice_once(key: str, message: str) -> None:
@@ -1404,6 +1522,29 @@ def _side_control_reason(status: CommandEchoStatus) -> str:
     return "unknown"
 
 
+def _side_has_control_with_stale_grace(status: CommandEchoStatus, *, stale_grace_s: float) -> bool:
+    if status.has_control:
+        return True
+    grace_s = max(float(stale_grace_s), 0.0)
+    if grace_s <= 0.0:
+        return False
+    if not status.is_valid or bool(status.missing_joints):
+        return False
+    if status.age_s is None:
+        return False
+    return float(status.age_s) <= grace_s
+
+
+def _format_side_control_debug(side: str, status: CommandEchoStatus) -> str:
+    age_text = "na" if status.age_s is None else f"{float(status.age_s):.3f}s"
+    missing_text = ",".join(status.missing_joints) if status.missing_joints else "-"
+    return (
+        f"{side}_control: reason={_side_control_reason(status)} "
+        f"valid={status.is_valid} fresh={status.is_fresh} age={age_text} "
+        f"missing_joints={missing_text}"
+    )
+
+
 def _append_loop_range(
     *,
     summary: dict[str, Any] | None,
@@ -1668,8 +1809,10 @@ def _write_capture_summary(
     joint_names: list[str],
     episode_summaries: list[dict[str, Any]],
     command_freshness_s: float,
+    stale_grace_s: float,
     missing_label_policy: str,
     buffered_observation_max_frames: int,
+    episode_start_min_fresh_frames: int,
 ) -> Path:
     summary_path = _summary_path(root)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1685,8 +1828,10 @@ def _write_capture_summary(
         "joint_names_per_side": list(joint_names),
         "capture_policy": {
             "command_freshness_s": float(command_freshness_s),
+            "stale_grace_s": float(stale_grace_s),
             "missing_label_policy": str(missing_label_policy),
             "buffered_observation_max_frames": int(buffered_observation_max_frames),
+            "episode_start_min_fresh_frames": int(episode_start_min_fresh_frames),
             "loop_index_base": 0,
             "loop_index_note": "Loop index is per-episode, incremented once per recorder control-loop iteration.",
         },
@@ -1762,6 +1907,16 @@ def main() -> None:
         help="Maximum allowed age of leader control echo before it is treated as missing/stale.",
     )
     parser.add_argument(
+        "--stale-grace-s",
+        type=float,
+        default=DEFAULT_STALE_GRACE_S,
+        help=(
+            "Optional grace window (seconds) to treat stale command echo as usable "
+            "when feedback is valid and all joint echoes have been seen. "
+            "Set >0 to reduce drops during short command-echo pauses."
+        ),
+    )
+    parser.add_argument(
         "--missing-label-policy",
         choices=MISSING_LABEL_POLICY_CHOICES,
         default=DEFAULT_MISSING_LABEL_POLICY,
@@ -1783,6 +1938,16 @@ def main() -> None:
         help=(
             "Only start the episode timer after the first fresh leader action label is observed. "
             "This avoids recording long pre-motion warmup and prevents pre-action observation buffering."
+        ),
+    )
+    parser.add_argument(
+        "--episode-start-min-fresh-frames",
+        "--episode_start_min_fresh_frames",
+        type=int,
+        default=DEFAULT_EPISODE_START_MIN_FRESH_FRAMES,
+        help=(
+            "When waiting for episode start on first action, require this many consecutive loops "
+            "with fresh leader action labels before recording starts."
         ),
     )
     parser.add_argument(
@@ -1906,6 +2071,8 @@ def main() -> None:
     args, unknown = parser.parse_known_args()
     if unknown:
         print("[WARN] Ignoring unsupported overrides: " + " ".join(unknown))
+    if args.episode_start_min_fresh_frames < 1:
+        raise ValueError("--episode-start-min-fresh-frames must be >= 1.")
 
     raw_cfg = _load_songling_yaml(args.config_path)
     dataset_opts = _resolve_dataset_options(raw_cfg, args)
@@ -1916,6 +2083,9 @@ def main() -> None:
 
     register_third_party_plugins()
     robot_cfg = _build_runtime_robot_config(raw_cfg, args, fallback_fps=dataset_opts.fps)
+    _ensure_required_can_interfaces_up(
+        [str(robot_cfg.left_arm_config.channel), str(robot_cfg.right_arm_config.channel)]
+    )
     camera_configs = _prefixed_camera_configs(robot_cfg)
     features, vector_names = _build_features(camera_configs=camera_configs, joint_names=joint_names, use_video=dataset_opts.video)
 
@@ -1951,16 +2121,22 @@ def main() -> None:
             "Action source policy: leader/master control echo only. "
             "If either side is missing or stale, that loop is dropped and never written."
         )
+    if args.episode_start_on_first_action:
+        if int(args.episode_start_min_fresh_frames) == 1:
+            start_timing_msg = "start timer on first fresh leader action"
+        else:
+            start_timing_msg = (
+                "start timer after "
+                f"{int(args.episode_start_min_fresh_frames)} consecutive loops with fresh leader action labels"
+            )
+    else:
+        start_timing_msg = "start timer immediately when episode loop begins"
+    print("Episode timing: " + start_timing_msg + f", end tail={max(float(args.episode_end_tail_s), 0.0):.2f}s")
     print(
-        "Episode timing: "
-        + (
-            "start timer on first fresh leader action"
-            if args.episode_start_on_first_action
-            else "start timer immediately when episode loop begins"
-        )
-        + f", end tail={max(float(args.episode_end_tail_s), 0.0):.2f}s"
+        "Control label timing: "
+        f"freshness={float(max(args.command_freshness_s, 0.0)):.3f}s, "
+        f"stale_grace={float(max(args.stale_grace_s, 0.0)):.3f}s"
     )
-    print(f"Control label freshness window: {float(max(args.command_freshness_s, 0.0)):.3f}s")
     print(f"Left pair CAN: {robot_cfg.left_arm_config.channel}")
     print(f"Right pair CAN: {robot_cfg.right_arm_config.channel}")
     print("Camera keys: " + ", ".join(sorted(camera_configs)))
@@ -2066,6 +2242,8 @@ def main() -> None:
                 print(f"\n[INFO] Recording episode {episode_idx} ...")
                 capture_start_t: float | None = None if args.episode_start_on_first_action else time.perf_counter()
                 tail_end_t: float | None = None
+                required_start_fresh_frames = max(int(args.episode_start_min_fresh_frames), 1)
+                start_fresh_streak = 0
                 ep_frames = 0
                 quick_save_requested = False
                 last_log_s = time.time()
@@ -2136,8 +2314,14 @@ def main() -> None:
                         robot.right_arm.bus,
                         max_age_s=args.command_freshness_s,
                     )
-                    left_has_control = left_status.has_control
-                    right_has_control = right_status.has_control
+                    left_has_control_raw = left_status.has_control
+                    right_has_control_raw = right_status.has_control
+                    left_has_control = _side_has_control_with_stale_grace(
+                        left_status, stale_grace_s=args.stale_grace_s
+                    )
+                    right_has_control = _side_has_control_with_stale_grace(
+                        right_status, stale_grace_s=args.stale_grace_s
+                    )
 
                     camera_frames, camera_health = _read_camera_frames_with_health(
                         cameras=cameras,
@@ -2177,39 +2361,77 @@ def main() -> None:
                         warned_right_missing_control = True
 
                     waiting_for_first_action = bool(args.episode_start_on_first_action and capture_start_t is None)
-                    if waiting_for_first_action and not missing_label:
-                        capture_start_t = time.perf_counter()
-                        last_log_s = time.time()
-                        print(
-                            f"[INFO] ep={episode_idx} first fresh leader action detected; "
-                            "start episode timer and frame capture."
-                        )
-                    elif waiting_for_first_action and missing_label:
-                        now_s = time.time()
-                        if now_s - last_wait_log_s >= 1.0:
-                            print(
-                                f"[INFO] ep={episode_idx} waiting for the first fresh leader action label "
-                                f"(left={left_has_control}, right={right_has_control})."
-                            )
-                            _print_camera_summary(camera_health)
-                            last_wait_log_s = now_s
-                        if rr is not None:
-                            display_frames_total += 1
-                            rr.set_time("frame", sequence=display_frames_total)
-                            for cam_key, image in camera_frames.items():
-                                entity = rr.Image(image).compress() if display_opts.display_compressed_images else rr.Image(image)
-                                rr.log(f"observation.images.{cam_key}", entity)
-                            for idx, name in enumerate(vector_names):
-                                rr.log(f"observation.state/{name}", rr.Scalars(float(observation_state[idx])))
-                            rr.log("status/left_cmd_echo", rr.Scalars(float(1.0 if left_has_control else 0.0)))
-                            rr.log("status/right_cmd_echo", rr.Scalars(float(1.0 if right_has_control else 0.0)))
-                            rr.log("status/left_obs_hz", rr.Scalars(float(robot.left_arm.bus.joint_feedback_hz)))
-                            rr.log("status/right_obs_hz", rr.Scalars(float(robot.right_arm.bus.joint_feedback_hz)))
-                            rr.log("status/left_cmd_hz", rr.Scalars(float(robot.left_arm.bus.command_feedback_hz)))
-                            rr.log("status/right_cmd_hz", rr.Scalars(float(robot.right_arm.bus.command_feedback_hz)))
-                        dt = time.perf_counter() - loop_start
-                        precise_sleep(max((1.0 / dataset_opts.fps) - dt, 0.0))
-                        continue
+                    if waiting_for_first_action:
+                        if missing_label:
+                            start_fresh_streak = 0
+                        else:
+                            start_fresh_streak += 1
+                            if start_fresh_streak >= required_start_fresh_frames:
+                                capture_start_t = time.perf_counter()
+                                last_log_s = time.time()
+                                if required_start_fresh_frames == 1:
+                                    print(
+                                        f"[INFO] ep={episode_idx} first fresh leader action detected; "
+                                        "start episode timer and frame capture."
+                                    )
+                                else:
+                                    print(
+                                        f"[INFO] ep={episode_idx} leader action labels stable for "
+                                        f"{start_fresh_streak} consecutive loops; "
+                                        "start episode timer and frame capture."
+                                    )
+
+                        if capture_start_t is None:
+                            now_s = time.time()
+                            if now_s - last_wait_log_s >= 1.0:
+                                if missing_label:
+                                    print(
+                                        f"[INFO] ep={episode_idx} waiting for the first fresh leader action label "
+                                        f"(left={left_has_control}, right={right_has_control})."
+                                    )
+                                    print(
+                                        "[INFO] control gate: "
+                                        f"freshness_window={float(max(args.command_freshness_s, 0.0)):.3f}s "
+                                        f"stale_grace={float(max(args.stale_grace_s, 0.0)):.3f}s"
+                                    )
+                                    print(f"[INFO] {_format_side_control_debug('left', left_status)}")
+                                    print(f"[INFO] {_format_side_control_debug('right', right_status)}")
+                                elif (left_has_control and not left_has_control_raw) or (
+                                    right_has_control and not right_has_control_raw
+                                ):
+                                    print(
+                                        "[INFO] control gate: using stale_grace to keep recording continuity "
+                                        f"(left_raw={left_has_control_raw}, left_effective={left_has_control}, "
+                                        f"right_raw={right_has_control_raw}, right_effective={right_has_control})."
+                                    )
+                                else:
+                                    print(
+                                        f"[INFO] ep={episode_idx} waiting for stable fresh leader action labels "
+                                        f"({start_fresh_streak}/{required_start_fresh_frames})."
+                                    )
+                                _print_camera_summary(camera_health)
+                                last_wait_log_s = now_s
+                            if rr is not None:
+                                display_frames_total += 1
+                                rr.set_time("frame", sequence=display_frames_total)
+                                for cam_key, image in camera_frames.items():
+                                    entity = (
+                                        rr.Image(image).compress()
+                                        if display_opts.display_compressed_images
+                                        else rr.Image(image)
+                                    )
+                                    rr.log(f"observation.images.{cam_key}", entity)
+                                for idx, name in enumerate(vector_names):
+                                    rr.log(f"observation.state/{name}", rr.Scalars(float(observation_state[idx])))
+                                rr.log("status/left_cmd_echo", rr.Scalars(float(1.0 if left_has_control else 0.0)))
+                                rr.log("status/right_cmd_echo", rr.Scalars(float(1.0 if right_has_control else 0.0)))
+                                rr.log("status/left_obs_hz", rr.Scalars(float(robot.left_arm.bus.joint_feedback_hz)))
+                                rr.log("status/right_obs_hz", rr.Scalars(float(robot.right_arm.bus.joint_feedback_hz)))
+                                rr.log("status/left_cmd_hz", rr.Scalars(float(robot.left_arm.bus.command_feedback_hz)))
+                                rr.log("status/right_cmd_hz", rr.Scalars(float(robot.right_arm.bus.command_feedback_hz)))
+                            dt = time.perf_counter() - loop_start
+                            precise_sleep(max((1.0 / dataset_opts.fps) - dt, 0.0))
+                            continue
 
                     loop_index = int(current_episode_summary.get("total_loops", 0)) if current_episode_summary is not None else 0
                     if current_episode_summary is not None:
@@ -2464,8 +2686,10 @@ def main() -> None:
                 joint_names=joint_names,
                 episode_summaries=episode_summaries,
                 command_freshness_s=float(max(args.command_freshness_s, 0.0)),
+                stale_grace_s=float(max(args.stale_grace_s, 0.0)),
                 missing_label_policy=args.missing_label_policy,
                 buffered_observation_max_frames=max(int(args.buffered_observation_max_frames), 0),
+                episode_start_min_fresh_frames=max(int(args.episode_start_min_fresh_frames), 1),
             )
             print(f"[INFO] Wrote action-source summary: {summary_path}")
             if dataset_opts.push_to_hub:

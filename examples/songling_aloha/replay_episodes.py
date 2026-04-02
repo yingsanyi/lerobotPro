@@ -15,6 +15,7 @@ traffic and aborts by default if it looks like an external leader is still activ
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import math
 import numbers
@@ -54,6 +55,7 @@ DEFAULT_CONFIG_PATH = Path("examples/songling_aloha/teleop.yaml")
 DEFAULT_SESSION_NAME = "songling_aloha_replay"
 ACTION_KEY = "action"
 OBS_STATE_KEY = "observation.state"
+IMPORT_SUMMARY_FILENAME = "songling_import_summary.json"
 MISSING_STATUS_OR_MODE_REASON = "未收到真实状态帧，也未观察到 `0x151` 模式命令"
 MISSING_DRIVER_ENABLE_REASON = "未收到驱动使能反馈"
 ENABLE_PREPARE_OUTER_RETRIES = 3
@@ -104,6 +106,73 @@ def _load_songling_yaml(config_path: Path) -> dict[str, Any]:
     if not isinstance(cfg, dict):
         raise ValueError(f"Config at {config_path} is not a valid mapping.")
     return cfg
+
+
+def _load_import_summary(dataset_root: Path | None) -> dict[str, Any]:
+    if dataset_root is None:
+        return {}
+    summary_path = dataset_root / "meta" / IMPORT_SUMMARY_FILENAME
+    if not summary_path.exists():
+        return {}
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Failed to read import summary at %s: %s", summary_path, exc)
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _load_dataset_info(dataset_root: Path | None) -> dict[str, Any]:
+    if dataset_root is None:
+        return {}
+    info_path = dataset_root / "meta" / "info.json"
+    if not info_path.exists():
+        return {}
+    try:
+        payload = json.loads(info_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Failed to read dataset info at %s: %s", info_path, exc)
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _normalize_recorded_control_source(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in {"auto"}:
+        return "auto"
+    if normalized in {"action", ACTION_KEY}:
+        return ACTION_KEY
+    if normalized in {"observation-state", "observation_state", OBS_STATE_KEY, "state"}:
+        return OBS_STATE_KEY
+    raise ValueError(
+        f"Unsupported recorded control source: {value!r}. Use 'auto', 'action', or 'observation-state'."
+    )
+
+
+def _resolve_recorded_control_source(requested: str, import_summary: dict[str, Any]) -> tuple[str, str | None]:
+    requested_normalized = _normalize_recorded_control_source(requested)
+    if requested_normalized != "auto":
+        return requested_normalized, None
+
+    preferred = (
+        import_summary.get("analysis", {})
+        .get("replay", {})
+        .get("preferred_control_source")
+    )
+    if preferred == OBS_STATE_KEY:
+        reason = (
+            import_summary.get("analysis", {})
+            .get("replay", {})
+            .get("reason")
+        )
+        return OBS_STATE_KEY, str(reason) if reason else None
+    return ACTION_KEY, None
+
+
+def _recorded_control_step_stats(import_summary: dict[str, Any], control_source: str) -> dict[str, Any]:
+    stats = import_summary.get("analysis", {}).get("step_stats", {})
+    payload = stats.get(control_source)
+    return payload if isinstance(payload, dict) else {}
 
 
 def _resolve_dataset_options(raw_cfg: dict[str, Any], args: argparse.Namespace) -> DatasetReplayOptions:
@@ -231,6 +300,20 @@ def _extract_action_dict(frame_row: dict[str, Any], action_names: list[str]) -> 
     return _named_vector(frame_row[ACTION_KEY], action_names)
 
 
+def _extract_recorded_control_dict(
+    frame_row: dict[str, Any],
+    *,
+    control_source: str,
+    action_names: list[str],
+    state_names: list[str],
+) -> dict[str, float]:
+    if control_source == ACTION_KEY:
+        return _extract_action_dict(frame_row, action_names)
+    if control_source == OBS_STATE_KEY:
+        return _named_vector(frame_row[OBS_STATE_KEY], state_names)
+    raise ValueError(f"Unsupported recorded control source: {control_source!r}")
+
+
 def _extract_replay_observation(
     frame_row: dict[str, Any],
     *,
@@ -244,6 +327,66 @@ def _extract_replay_observation(
         if camera_key in frame_row:
             observation[camera_key] = frame_row[camera_key]
     return observation
+
+
+def _maybe_auto_tune_live_step_limits(
+    *,
+    enabled: bool,
+    import_summary: dict[str, Any],
+    control_source: str,
+    live_max_joint_step: float | None,
+    live_max_gripper_step: float | None,
+) -> tuple[float | None, float | None]:
+    stats = _recorded_control_step_stats(import_summary, control_source)
+    if not stats:
+        return live_max_joint_step, live_max_gripper_step
+
+    resolved_joint = live_max_joint_step
+    resolved_gripper = live_max_gripper_step
+    recommended_joint = float(stats.get("joint_p95_deg", 0.0) or 0.0)
+    recommended_gripper = float(stats.get("gripper_p95_mm", 0.0) or 0.0)
+
+    if resolved_joint is not None and recommended_joint > 0.0 and resolved_joint + 1e-6 < recommended_joint:
+        if enabled:
+            logger.warning(
+                "live_max_joint_step=%.3f is tighter than imported dataset %s p95 step %.3f deg; "
+                "auto-relaxing to %.3f for more faithful replay.",
+                resolved_joint,
+                control_source,
+                recommended_joint,
+                recommended_joint,
+            )
+            resolved_joint = recommended_joint
+        else:
+            logger.warning(
+                "live_max_joint_step=%.3f is tighter than imported dataset %s p95 step %.3f deg; "
+                "trajectory distortion is likely.",
+                resolved_joint,
+                control_source,
+                recommended_joint,
+            )
+
+    if resolved_gripper is not None and recommended_gripper > 0.0 and resolved_gripper + 1e-6 < recommended_gripper:
+        if enabled:
+            logger.warning(
+                "live_max_gripper_step=%.3f is tighter than imported dataset %s p95 step %.3f mm; "
+                "auto-relaxing to %.3f for more faithful replay.",
+                resolved_gripper,
+                control_source,
+                recommended_gripper,
+                recommended_gripper,
+            )
+            resolved_gripper = recommended_gripper
+        else:
+            logger.warning(
+                "live_max_gripper_step=%.3f is tighter than imported dataset %s p95 step %.3f mm; "
+                "trajectory distortion is likely.",
+                resolved_gripper,
+                control_source,
+                recommended_gripper,
+            )
+
+    return resolved_joint, resolved_gripper
 
 
 def _slice_episode_indices(*, total: int, start_frame: int, max_frames: int | None) -> tuple[list[int], int]:
@@ -307,6 +450,7 @@ def _run_offline_replay(
     replay_dataset: LeRobotDataset,
     replay_indices: list[int],
     playback_fps: int,
+    recorded_control_source: str,
     action_names: list[str],
     state_names: list[str],
     camera_keys: list[str],
@@ -320,12 +464,22 @@ def _run_offline_replay(
     if play_sounds:
         log_say("Replaying episode", play_sounds, blocking=True)
 
-    logger.info("Starting offline replay. frames=%d fps=%d", len(replay_indices), playback_fps)
+    logger.info(
+        "Starting offline replay. frames=%d fps=%d control_source=%s",
+        len(replay_indices),
+        playback_fps,
+        recorded_control_source,
+    )
     for local_idx, replay_idx in enumerate(replay_indices):
         loop_start = time.perf_counter()
         global_frame = start_frame + local_idx
         replay_item = _get_replay_item(replay_dataset, replay_idx, include_media=display_data)
-        action = _extract_action_dict(replay_item, action_names)
+        action = _extract_recorded_control_dict(
+            replay_item,
+            control_source=recorded_control_source,
+            action_names=action_names,
+            state_names=state_names,
+        )
 
         if display_data and _safe_rr_set_time("frame", sequence=global_frame):
             replay_observation = _extract_replay_observation(
@@ -1471,6 +1625,7 @@ def _run_live_integrated_replay(
     replay_dataset: LeRobotDataset,
     replay_indices: list[int],
     playback_fps: int,
+    recorded_control_source: str,
     action_names: list[str],
     state_names: list[str],
     camera_keys: list[str],
@@ -1544,9 +1699,10 @@ def _run_live_integrated_replay(
             last_sent_action = _get_live_joint_observation(robot)
 
         logger.info(
-            "Starting live integrated replay. frames=%d fps=%d left_can=%s right_can=%s",
+            "Starting live integrated replay. frames=%d fps=%d control_source=%s left_can=%s right_can=%s",
             len(replay_indices),
             playback_fps,
+            recorded_control_source,
             robot_cfg.left_arm_config.channel,
             robot_cfg.right_arm_config.channel,
         )
@@ -1571,7 +1727,12 @@ def _run_live_integrated_replay(
             )
             live_reference = _get_live_joint_observation(robot)
             replay_item = _get_replay_item(replay_dataset, replay_idx, include_media=live_include_recorded_media)
-            recorded_action = _extract_action_dict(replay_item, action_names)
+            recorded_action = _extract_recorded_control_dict(
+                replay_item,
+                control_source=recorded_control_source,
+                action_names=action_names,
+                state_names=state_names,
+            )
             action_to_send = _limit_action_step(
                 recorded_action,
                 reference_action=_build_action_reference(
@@ -1677,6 +1838,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset.root", "--dataset-root", dest="dataset_root", default=None)
     parser.add_argument("--dataset.episode", "--dataset-episode", dest="dataset_episode", type=int, default=0)
     parser.add_argument("--fps", dest="fps", type=int, default=None, help="Playback FPS. Defaults to dataset fps.")
+    parser.add_argument(
+        "--recorded-control-source",
+        default="auto",
+        help="Which recorded vector to replay in live/offline mode: auto, action, or observation-state.",
+    )
     parser.add_argument("--start-frame", dest="start_frame", type=int, default=0)
     parser.add_argument("--max-frames", dest="max_frames", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true", help="Print resolved replay settings and exit.")
@@ -1875,6 +2041,13 @@ def _parse_args() -> argparse.Namespace:
         help="Per-command gripper step limit in mm for live replay; <=0 disables this limit.",
     )
     parser.add_argument(
+        "--no-import-step-auto-tune",
+        dest="import_step_auto_tune",
+        action="store_false",
+        help="Do not auto-relax live step limits based on imported dataset summary.",
+    )
+    parser.set_defaults(import_step_auto_tune=True)
+    parser.add_argument(
         "--max-relative-target",
         type=float,
         default=None,
@@ -1951,12 +2124,29 @@ def main() -> None:
     play_sounds = False if args.play_sounds is None else _parse_cli_bool(args.play_sounds)
     if args.play_sounds is None and "play_sounds" in raw_cfg:
         play_sounds = bool(raw_cfg.get("play_sounds"))
+    import_summary = _load_import_summary(dataset_opts.root)
+    recorded_control_source, recorded_control_reason = _resolve_recorded_control_source(
+        args.recorded_control_source,
+        import_summary,
+    )
 
     if (display_ip is None) != (display_port is None):
         raise ValueError("Please set both display_ip and display_port together, or omit both.")
 
     if args.dry_run:
-        playback_fps = args.fps if args.fps is not None else int(raw_dataset.get("fps", raw_cfg.get("fps", 30)))
+        dataset_info = _load_dataset_info(dataset_opts.root)
+        playback_fps = (
+            args.fps
+            if args.fps is not None
+            else int(dataset_info.get("fps", raw_dataset.get("fps", raw_cfg.get("fps", 30))))
+        )
+        dry_run_joint_step, dry_run_gripper_step = _maybe_auto_tune_live_step_limits(
+            enabled=bool(args.import_step_auto_tune),
+            import_summary=import_summary,
+            control_source=recorded_control_source,
+            live_max_joint_step=live_max_joint_step,
+            live_max_gripper_step=live_max_gripper_step,
+        )
         print("=" * 50)
         print("Songling ALOHA Replay")
         print("=" * 50)
@@ -1965,6 +2155,16 @@ def main() -> None:
         print(f"Dataset root: {dataset_opts.root}")
         print(f"Episode: {dataset_opts.episode}")
         print(f"Playback FPS: {playback_fps}")
+        print(f"Recorded control source: {recorded_control_source}")
+        if recorded_control_reason:
+            print(f"Control source hint: {recorded_control_reason}")
+        control_stats = _recorded_control_step_stats(import_summary, recorded_control_source)
+        if control_stats:
+            print(
+                "Imported replay p95 step: "
+                f"joint={float(control_stats.get('joint_p95_deg', 0.0)):.3f} deg, "
+                f"gripper={float(control_stats.get('gripper_p95_mm', 0.0)):.3f} mm"
+            )
         print(f"Mode: {'live replay' if args.connect_live else 'offline replay'}")
         if args.connect_live:
             print(f"Leader activity guard: check {args.leader_activity_check_s:.2f}s, allow_active={args.allow_active_leader}")
@@ -1993,8 +2193,8 @@ def main() -> None:
                 "Live replay extras: "
                 f"recorded_media={'on' if live_include_recorded_media else 'off'}, "
                 f"live_cameras={'on' if live_read_cameras else 'off'}, "
-                f"joint_step_limit={live_max_joint_step if live_max_joint_step is not None else 'off'}, "
-                f"gripper_step_limit={live_max_gripper_step if live_max_gripper_step is not None else 'off'}"
+                f"joint_step_limit={dry_run_joint_step if dry_run_joint_step is not None else 'off'}, "
+                f"gripper_step_limit={dry_run_gripper_step if dry_run_gripper_step is not None else 'off'}"
             )
         print(
             "Display: "
@@ -2032,9 +2232,27 @@ def main() -> None:
     playback_fps = args.fps if args.fps is not None else int(dataset.fps)
     if playback_fps <= 0:
         raise ValueError(f"Invalid playback fps: {playback_fps}.")
+    if dataset_opts.root is None:
+        import_summary = _load_import_summary(Path(dataset.root))
+        recorded_control_source, recorded_control_reason = _resolve_recorded_control_source(
+            args.recorded_control_source,
+            import_summary,
+        )
+    if recorded_control_source == OBS_STATE_KEY and state_names != action_names:
+        raise ValueError(
+            "Dataset observation.state names do not match action names, so observation-state replay is unsafe."
+        )
+    live_max_joint_step, live_max_gripper_step = _maybe_auto_tune_live_step_limits(
+        enabled=bool(args.import_step_auto_tune),
+        import_summary=import_summary,
+        control_source=recorded_control_source,
+        live_max_joint_step=live_max_joint_step,
+        live_max_gripper_step=live_max_gripper_step,
+    )
 
     logger.info(
-        "Replay config: repo_id=%s root=%s episode=%d frames=%d start_frame=%d stop_frame=%d fps=%d connect_live=%s",
+        "Replay config: repo_id=%s root=%s episode=%d frames=%d start_frame=%d stop_frame=%d fps=%d "
+        "connect_live=%s control_source=%s",
         dataset_opts.repo_id,
         str(dataset_opts.root) if dataset_opts.root is not None else "default",
         dataset_opts.episode,
@@ -2043,7 +2261,10 @@ def main() -> None:
         stop_frame,
         playback_fps,
         args.connect_live,
+        recorded_control_source,
     )
+    if recorded_control_reason:
+        logger.info("Recorded control source hint: %s", recorded_control_reason)
     args.pre_replay_enable_and_zero = pre_replay_enable_and_zero
     args.post_replay_return_to_zero = post_replay_return_to_zero
 
@@ -2061,6 +2282,7 @@ def main() -> None:
                 replay_dataset=dataset,
                 replay_indices=replay_indices,
                 playback_fps=playback_fps,
+                recorded_control_source=recorded_control_source,
                 action_names=action_names,
                 state_names=state_names,
                 camera_keys=camera_keys,
@@ -2078,6 +2300,7 @@ def main() -> None:
                 replay_dataset=dataset,
                 replay_indices=replay_indices,
                 playback_fps=playback_fps,
+                recorded_control_source=recorded_control_source,
                 action_names=action_names,
                 state_names=state_names,
                 camera_keys=camera_keys,
